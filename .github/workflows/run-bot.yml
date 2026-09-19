@@ -43,3 +43,4 @@ jobs:
           PUBLISH: ${{ github.event.inputs.publish || 'false' }}
           RESOLUTIONS: "480,720,1080"
           MAX_VIDEOS: "1"
+          GEMINI_MODEL: "gemini-3.6-flash"
