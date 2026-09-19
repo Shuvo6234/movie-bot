@@ -30,14 +30,13 @@ GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 BLOG_ID = os.environ["BLOG_ID"]
 INPUT_FOLDER = os.environ["DRIVE_INPUT_FOLDER_ID"]
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 RESOLUTIONS = [int(x) for x in os.environ.get("RESOLUTIONS", "480,720,1080").split(",") if x.strip()]
 MAX_VIDEOS = int(os.environ.get("MAX_VIDEOS", "1"))
 PUBLISH = os.environ.get("PUBLISH", "false").lower() == "true"
 LANGUAGE_HINT = os.environ.get("LANGUAGE_HINT", "").strip()
 AUDIO_MINUTES = int(os.environ.get("AUDIO_MINUTES", "10"))
 SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
-WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
 CRF = {480: 24, 720: 23, 1080: 22, 1440: 22, 2160: 21}
 
 WORK = Path("work")
@@ -125,32 +124,13 @@ def upload_public(path, parent, mime):
 
 
 # ---------- ffmpeg helpers ----------
-def parse_fps(*vals):
-    for v in vals:
-        try:
-            a, b = str(v).split("/")
-            a, b = float(a), float(b)
-            if b and a / b > 0:
-                return a / b
-        except Exception:  # noqa
-            pass
-    return 30.0
-
-
-def fmt_fps(x):
-    r = round(x)
-    return str(r) if abs(x - r) < 0.05 else f"{x:.2f}"
-
-
 def probe(path):
     out = subprocess.check_output([
         "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate:format=duration",
+        "-show_entries", "stream=height:format=duration",
         "-of", "json", path])
     d = json.loads(out)
-    st = d["streams"][0]
-    fps = parse_fps(st.get("avg_frame_rate"), st.get("r_frame_rate"))
-    return float(d["format"]["duration"]), int(st["width"]), int(st["height"]), fps
+    return float(d["format"]["duration"]), int(d["streams"][0]["height"])
 
 
 def make_screenshots(src, dur, outdir):
@@ -164,17 +144,11 @@ def make_screenshots(src, dur, outdir):
     return files
 
 
-def make_thumbnail(src, dur, w, h, outdir):
+def make_thumbnail(src, dur, outdir):
     """9:16 portrait thumbnail, 720x1280, centre crop from a frame at 35%."""
-    if w * 16 >= h * 9:            # wider than 9:16 -> keep full height
-        ch = h // 2 * 2
-        cw = int(h * 9 / 16) // 2 * 2
-    else:                          # narrower -> keep full width
-        cw = w // 2 * 2
-        ch = int(w * 16 / 9) // 2 * 2
     p = str(outdir / "thumb_9x16.jpg")
     run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{dur * 0.35:.2f}", "-i", src,
-         "-frames:v", "1", "-vf", f"crop={cw}:{ch},scale=720:1280", "-q:v", "2", p])
+         "-frames:v", "1", "-vf", "crop=ih*9/16:ih,scale=720:1280", "-q:v", "2", p])
     return p
 
 
@@ -194,12 +168,11 @@ def analysis_inputs(src, dur, outdir):
     return frames, audio.read_bytes()
 
 
-def transcode(src, target, w, h, out):
-    """target = length of the SHORT side (480/720/1080): works for landscape and vertical."""
-    crf = CRF.get(target, 23)
-    vf = f"scale=-2:{target}" if w >= h else f"scale={target}:-2"
+def transcode(src, height, out):
+    crf = CRF.get(height, 23)
     run(["ffmpeg", "-y", "-loglevel", "error", "-stats", "-i", src,
-         "-map", "0:v:0", "-map", "0:a?", "-vf", vf, "-pix_fmt", "yuv420p",
+         "-map", "0:v:0", "-map", "0:a?",
+         "-vf", f"scale=-2:{height}",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out])
 
@@ -220,19 +193,14 @@ Return ONLY JSON with keys:
 Do not invent famous actor names or claim awards."""
     parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
     parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
-    data = {}
-    for model in dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest"]):
-        try:
-            resp = retry(lambda: gclient.models.generate_content(
-                model=model, contents=[prompt, *parts],
-                config=types.GenerateContentConfig(response_mime_type="application/json")), tries=2)
-            data = json.loads(re.sub(r"^```json|```$", "", resp.text.strip()).strip())
-            log("  Gemini model used:", model)
-            break
-        except Exception as e:  # noqa
-            log(f"  Gemini model {model} failed: {e}")
-    if not data:
-        log("  Using fallback text.")
+    try:
+        resp = retry(lambda: gclient.models.generate_content(
+            model=GEMINI_MODEL, contents=[prompt, *parts],
+            config=types.GenerateContentConfig(response_mime_type="application/json")), tries=3)
+        data = json.loads(re.sub(r"^```json|```$", "", resp.text.strip()).strip())
+    except Exception as e:  # noqa
+        log("  Gemini failed, using fallback text:", e)
+        data = {}
     return {
         "title": data.get("title") or hint or "Untitled Film",
         "synopsis": data.get("synopsis") or "An original film.",
@@ -255,74 +223,26 @@ def img_url(fid):
     return f"https://lh3.googleusercontent.com/d/{fid}"
 
 
-TIMER_SCRIPT = """<script>
-(function () {
-  var WAIT = %d;
-  var btns = document.querySelectorAll('a.mv-dl[data-fid]');
-  for (var i = 0; i < btns.length; i++) {
-    (function (b) {
-      var label = b.innerHTML;
-      var busy = false;
-      b.addEventListener('click', function (e) {
-        e.preventDefault();
-        if (busy) { return; }
-        busy = true;
-        var left = WAIT;
-        b.style.opacity = '0.85';
-        b.innerHTML = 'Please wait ' + left + ' seconds...';
-        var t = setInterval(function () {
-          left--;
-          if (left > 0) {
-            b.innerHTML = 'Please wait ' + left + ' seconds...';
-            return;
-          }
-          clearInterval(t);
-          b.innerHTML = 'Download starting...';
-          window.location.href = 'https://drive.usercontent.google.com/download?id=' +
-            b.getAttribute('data-fid') + '&export=download&confirm=t';
-          setTimeout(function () {
-            b.innerHTML = label;
-            b.style.opacity = '1';
-            busy = false;
-          }, 6000);
-        }, 1000);
-      });
-    })(btns[i]);
-  }
-})();
-</script>""" % WAIT_SECONDS
-
-
-def build_html(meta, thumb_id, shot_ids, outputs, fps):
+def build_html(meta, thumb_id, shot_ids, outputs):
     e = html.escape
     title = e(meta["title"])
-    year = meta["release_year"]
-    lang = e(meta["language"])
     genres = ", ".join(e(g) for g in meta["genres"])
-    fps_txt = fmt_fps(fps)
     qualities = " - ".join(f"{h}p" for h, _, _ in outputs)
     sizes = " - ".join(human(s) for _, _, s in outputs)
     player_id = next((fid for h, fid, _ in outputs if h == 720), outputs[-1][1])
 
-    btn = ("display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
-           "text-align:center;color:#fff;font-weight:800;font-size:19px;"
-           "text-decoration:none;cursor:pointer;"
-           "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
-           "box-shadow:0 8px 14px rgba(0,0,0,.45);")
-    head = ("text-align:center;color:#fff;font-size:21px;line-height:1.4;"
-            "margin:28px 0 18px;font-weight:800")
-    hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.6);margin:22px 0"/>'
-
+    btn = ("display:block;max-width:520px;margin:6px auto 18px;padding:16px 10px;"
+           "text-align:center;color:#fff;font-weight:700;text-decoration:none;"
+           "background:linear-gradient(90deg,#0a4d0a,#001a80);")
     parts = [
         f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title}" '
         f'width="270" style="max-width:60%;height:auto;border-radius:8px"/></div>',
-        f'<p style="text-align:center"><b>Download {title} ({year}) - Full Movie</b></p>',
+        f'<p style="text-align:center"><b>Download {title} ({meta["release_year"]}) - Full Movie</b></p>',
         '<h3 style="text-align:center">Movie Info</h3>',
         f'<p><b>Movie Name:</b> {title}<br/>'
-        f'<b>Release Year:</b> {year}<br/>'
-        f'<b>Language:</b> {lang}<br/>'
+        f'<b>Release Year:</b> {meta["release_year"]}<br/>'
+        f'<b>Language:</b> {e(meta["language"])}<br/>'
         f'<b>Quality:</b> {qualities}<br/>'
-        f'<b>Frame Rate:</b> {fps_txt}fps<br/>'
         f'<b>Size:</b> {sizes}<br/>'
         f'<b>Genres:</b> {genres}</p>',
         '<h3 style="text-align:center">Movie-SYNOPSIS/PLOT:</h3>',
@@ -336,21 +256,13 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps):
     for fid in shot_ids:
         parts.append(f'<p style="text-align:center"><img src="{img_url(fid)}" alt="{title} screenshot" '
                      'style="max-width:100%;height:auto"/></p>')
-    parts.append(hr)
     parts.append('<h3 style="text-align:center">Download Links</h3>')
     for h, fid, size in outputs:
-        direct = (f"https://drive.usercontent.google.com/download?id={fid}"
-                  "&amp;export=download&amp;confirm=t")
-        parts.append(
-            f'<h4 style="{head}">{title} ({year}) '
-            f'<span style="color:#f2f200">{{{lang}}}</span> '
-            f'{h}p x264 {fps_txt}fps [{human(size)}]</h4>')
-        parts.append(
-            f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
-            '&#11015;&#9889;DOWNLOAD NOW&#9889;&#11015;</a>')
-    parts.append(hr)
+        link = f"https://drive.google.com/uc?export=download&id={fid}"
+        parts.append(f'<h4 style="text-align:center;color:#ff7b7b">{h}p x264</h4>')
+        parts.append(f'<a href="{link}" target="_blank" rel="noopener" style="{btn}">'
+                     f'&#11015;&#9889; CLICK HERE TO DOWNLOAD ({human(size)}) &#9889;&#11015;</a>')
     parts.append('<h3 style="text-align:center;color:#f0a0ff">Winding Up &#10084;&#65039;</h3>')
-    parts.append(TIMER_SCRIPT)
     return "\n".join(parts)
 
 
@@ -365,29 +277,30 @@ def process(video, processed_folder, output_folder):
 
     log("Downloading original...")
     download(video["id"], src)
-    dur, w, h, fps = probe(src)
-    short = min(w, h)
-    log(f"Duration {dur / 60:.1f} min, {w}x{h}, {fps:.2f} fps")
+    dur, src_h = probe(src)
+    log(f"Duration {dur / 60:.1f} min, height {src_h}p")
 
     log("Making screenshots and thumbnail...")
     shots = make_screenshots(src, dur, job)
-    thumb = make_thumbnail(src, dur, w, h, job)
+    thumb = make_thumbnail(src, dur, job)
 
     log("Analysing with Gemini...")
     frames, audio = analysis_inputs(src, dur, job)
     meta = analyze(name, frames, audio)
     log("  Title:", meta["title"])
 
-    targets = sorted({t for t in RESOLUTIONS if t <= short * 1.05}) or [short]
+    heights = sorted({h for h in RESOLUTIONS if h <= src_h * 1.05})
+    if not heights:
+        heights = [src_h]
     outputs = []
-    for t in targets:
-        out = str(job / f"{slug}_{t}p.mp4")
-        log(f"Converting to {t}p...")
-        transcode(src, t, w, h, out)
+    for h in heights:
+        out = str(job / f"{slug}_{h}p.mp4")
+        log(f"Converting to {h}p...")
+        transcode(src, h, out)
         size = os.path.getsize(out)
-        log(f"Uploading {t}p ({human(size)})...")
+        log(f"Uploading {h}p ({human(size)})...")
         fid = upload_public(out, output_folder, "video/mp4")
-        outputs.append((t, fid, size))
+        outputs.append((h, fid, size))
         os.remove(out)  # free disk
 
     log("Uploading images...")
@@ -396,7 +309,7 @@ def process(video, processed_folder, output_folder):
 
     labels = [g for g in meta["genres"]][:3] + [meta["language"], str(meta["release_year"])]
     labels = [str(l)[:40] for l in labels if l][:8]
-    content = build_html(meta, thumb_id, shot_ids, outputs, fps)
+    content = build_html(meta, thumb_id, shot_ids, outputs)
     body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) - Full Movie',
             "content": content, "labels": labels}
     post = retry(lambda: blogger.posts().insert(
