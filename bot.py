@@ -38,6 +38,7 @@ LANGUAGE_HINT = os.environ.get("LANGUAGE_HINT", "").strip()
 AUDIO_MINUTES = int(os.environ.get("AUDIO_MINUTES", "10"))
 SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
 WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
+DIRECTOR_NAME = os.environ.get("DIRECTOR_NAME", "").strip()
 CRF = {480: 24, 720: 23, 1080: 22, 1440: 22, 2160: 21}
 
 WORK = Path("work")
@@ -205,19 +206,39 @@ def transcode(src, target, w, h, out):
 
 
 # ---------- Gemini ----------
+def as_paragraphs(v):
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [p.strip() for p in re.split(r"\n\s*\n", str(v or "")) if p.strip()]
+
+
 def analyze(filename_hint, frames, audio_bytes):
     hint = Path(filename_hint).stem.replace("_", " ").replace(".", " ").strip()
-    prompt = f"""You are helping publish an ORIGINAL film by its director on a movie blog.
-You get 12 frames spread across the film and an audio sample. The file name hint is: "{hint}".
-Language hint (may be empty): "{LANGUAGE_HINT}".
-Return ONLY JSON with keys:
-  title: catchy movie title (use the file name hint if it looks like a real title),
-  synopsis: 3-4 sentence spoiler-light plot description in English, based on what you see/hear,
-  genres: list of 1-3 genres (e.g. Drama, Thriller, Romance),
+    year = datetime.now().year
+    prompt = f"""You are writing the web page text for an ORIGINAL film that is published by its own
+director on a film blog. You get 12 frames spread across the film and an audio sample.
+File name hint: "{hint}". Language hint (may be empty): "{LANGUAGE_HINT}".
+
+Rules:
+- Write natural, original, helpful text for readers, in English.
+- Base it ONLY on what you can see and hear. If unsure, stay general.
+- Never invent cast, crew, awards, festivals, ratings or plot facts you cannot see.
+- Do not use piracy words (leaked, free HD print, download full movie, WEB-DL, dual audio, 300mb).
+
+Return ONLY JSON with these keys:
+  title: catchy title (use the file name hint if it looks like a real title),
+  tagline: one sentence, max 20 words,
+  synopsis: 2 short paragraphs (about 120 words), spoiler-light, separated by a blank line,
+  about: 3 short paragraphs (about 220 words) on tone, visual style, sound, themes and what
+         viewers can expect, separated by blank lines,
+  themes: list of 3-5 short phrases,
+  faq: list of 3 objects {{"q": "...", "a": "..."}} with 1-2 sentence answers about the film
+       (genre, language, who it suits, mood),
+  genres: list of 1-3 genres,
   language: main spoken language,
-  release_year: integer (use {datetime.now().year} if unknown),
-  tags: list of up to 6 short keywords.
-Do not invent famous actor names or claim awards."""
+  release_year: integer (use {year} if unknown),
+  content_rating: one of "General audience", "Teen and above", "Mature audience",
+  tags: list of up to 6 short keywords."""
     parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
     parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
     data = {}
@@ -233,12 +254,18 @@ Do not invent famous actor names or claim awards."""
             log(f"  Gemini model {model} failed: {e}")
     if not data:
         log("  Using fallback text.")
+    faq = [f for f in (data.get("faq") or []) if isinstance(f, dict) and f.get("q") and f.get("a")]
     return {
         "title": data.get("title") or hint or "Untitled Film",
-        "synopsis": data.get("synopsis") or "An original film.",
+        "tagline": data.get("tagline") or "",
+        "synopsis": as_paragraphs(data.get("synopsis")) or ["An original film."],
+        "about": as_paragraphs(data.get("about")),
+        "themes": [str(t) for t in (data.get("themes") or [])][:5],
+        "faq": faq[:3],
         "genres": data.get("genres") or ["Drama"],
         "language": data.get("language") or LANGUAGE_HINT or "Unknown",
-        "release_year": data.get("release_year") or datetime.now().year,
+        "release_year": data.get("release_year") or year,
+        "content_rating": data.get("content_rating") or "General audience",
         "tags": data.get("tags") or [],
     }
 
@@ -249,6 +276,16 @@ def human(n):
     if n >= 1024 ** 3:
         return f"{n / 1024 ** 3:.1f}GB"
     return f"{n / 1024 ** 2:.0f}MB"
+
+
+def fmt_runtime(sec):
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec} sec"
+    m = sec // 60
+    if m < 60:
+        return f"{m} min"
+    return f"{m // 60} h {m % 60} min"
 
 
 def img_url(fid):
@@ -293,7 +330,7 @@ TIMER_SCRIPT = """<script>
 </script>""" % WAIT_SECONDS
 
 
-def build_html(meta, thumb_id, shot_ids, outputs, fps):
+def build_html(meta, thumb_id, shot_ids, outputs, fps, dur):
     e = html.escape
     title = e(meta["title"])
     year = meta["release_year"]
@@ -301,7 +338,7 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps):
     genres = ", ".join(e(g) for g in meta["genres"])
     fps_txt = fmt_fps(fps)
     qualities = " - ".join(f"{h}p" for h, _, _ in outputs)
-    sizes = " - ".join(human(s) for _, _, s in outputs)
+    owner = e(DIRECTOR_NAME) if DIRECTOR_NAME else "the filmmaker"
     player_id = next((fid for h, fid, _ in outputs if h == 720), outputs[-1][1])
 
     btn = ("display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
@@ -314,30 +351,56 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps):
     hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.6);margin:22px 0"/>'
 
     parts = [
-        f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title}" '
+        f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title} film poster" '
         f'width="270" style="max-width:60%;height:auto;border-radius:8px"/></div>',
-        f'<p style="text-align:center"><b>Download {title} ({year}) - Full Movie</b></p>',
-        '<h3 style="text-align:center">Movie Info</h3>',
-        f'<p><b>Movie Name:</b> {title}<br/>'
-        f'<b>Release Year:</b> {year}<br/>'
-        f'<b>Language:</b> {lang}<br/>'
-        f'<b>Quality:</b> {qualities}<br/>'
-        f'<b>Frame Rate:</b> {fps_txt}fps<br/>'
-        f'<b>Size:</b> {sizes}<br/>'
-        f'<b>Genres:</b> {genres}</p>',
-        '<h3 style="text-align:center">Movie-SYNOPSIS/PLOT:</h3>',
-        f'<p>{e(meta["synopsis"])}</p>',
-        f'<h3>Watch {title} Online</h3>',
+    ]
+    if meta["tagline"]:
+        parts.append(f'<p style="text-align:center"><i>{e(meta["tagline"])}</i></p>')
+    parts.append(
+        f'<p><b>{title}</b> ({year}) is an original {lang} film by {owner}, '
+        'published here by its creator.</p>')
+
+    parts.append(f'<h3>About {title}</h3>')
+    for p in meta["synopsis"] + meta["about"]:
+        parts.append(f'<p>{e(p)}</p>')
+
+    details = [f'<b>Title:</b> {title}']
+    if DIRECTOR_NAME:
+        details.append(f'<b>Directed by:</b> {e(DIRECTOR_NAME)}')
+    details += [
+        f'<b>Release Year:</b> {year}',
+        f'<b>Language:</b> {lang}',
+        f'<b>Genres:</b> {genres}',
+        f'<b>Runtime:</b> {fmt_runtime(dur)}',
+        f'<b>Content Rating:</b> {e(meta["content_rating"])}',
+        f'<b>Available Quality:</b> {qualities}',
+        f'<b>Frame Rate:</b> {fps_txt}fps',
+    ]
+    parts.append('<h3>Film Details</h3>')
+    parts.append('<p>' + '<br/>'.join(details) + '</p>')
+
+    if meta["themes"]:
+        parts.append('<h3>Themes</h3>')
+        parts.append('<ul>' + ''.join(f'<li>{e(t)}</li>' for t in meta["themes"]) + '</ul>')
+
+    parts.append(f'<h3>Watch {title} Online</h3>')
+    parts.append(
         f'<iframe src="https://drive.google.com/file/d/{player_id}/preview" '
         'width="100%" height="420" allow="autoplay" allowfullscreen="true" '
-        'style="border:0;max-width:100%"></iframe>',
-        '<h3 style="text-align:center">Screenshots: (Must See Before Downloading)...</h3>',
-    ]
-    for fid in shot_ids:
-        parts.append(f'<p style="text-align:center"><img src="{img_url(fid)}" alt="{title} screenshot" '
-                     'style="max-width:100%;height:auto"/></p>')
+        'style="border:0;max-width:100%"></iframe>')
+
+    parts.append('<h3>Screenshots</h3>')
+    for i, fid in enumerate(shot_ids, 1):
+        parts.append(f'<p style="text-align:center"><img src="{img_url(fid)}" '
+                     f'alt="Scene {i} from {title}" style="max-width:100%;height:auto"/></p>')
+
+    if meta["faq"]:
+        parts.append('<h3>Frequently Asked Questions</h3>')
+        for f in meta["faq"]:
+            parts.append(f'<p><b>{e(str(f["q"]))}</b><br/>{e(str(f["a"]))}</p>')
+
     parts.append(hr)
-    parts.append('<h3 style="text-align:center">Download Links</h3>')
+    parts.append('<h3 style="text-align:center">Download for Offline Viewing</h3>')
     for h, fid, size in outputs:
         direct = (f"https://drive.usercontent.google.com/download?id={fid}"
                   "&amp;export=download&amp;confirm=t")
@@ -349,7 +412,10 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps):
             f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
             '&#11015;&#9889;DOWNLOAD NOW&#9889;&#11015;</a>')
     parts.append(hr)
-    parts.append('<h3 style="text-align:center;color:#f0a0ff">Winding Up &#10084;&#65039;</h3>')
+    parts.append(
+        f'<p style="text-align:center;font-size:14px">&copy; {year} {owner}. All rights reserved. '
+        'This is an original film published by its creator. Please do not re-upload or '
+        'redistribute it without written permission.</p>')
     parts.append(TIMER_SCRIPT)
     return "\n".join(parts)
 
@@ -396,8 +462,8 @@ def process(video, processed_folder, output_folder):
 
     labels = [g for g in meta["genres"]][:3] + [meta["language"], str(meta["release_year"])]
     labels = [str(l)[:40] for l in labels if l][:8]
-    content = build_html(meta, thumb_id, shot_ids, outputs, fps)
-    body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) - Full Movie',
+    content = build_html(meta, thumb_id, shot_ids, outputs, fps, dur)
+    body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) | Original {meta["language"]} Film',
             "content": content, "labels": labels}
     post = retry(lambda: blogger.posts().insert(
         blogId=BLOG_ID, body=body, isDraft=not PUBLISH).execute())
