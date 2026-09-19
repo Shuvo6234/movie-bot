@@ -1,6 +1,6 @@
 """
 Movie Bot: Drive video -> multi-resolution -> screenshots + 9:16 thumbnail
--> Gemini title/description -> Blogger post (draft by default).
+-> Gemini title/description/labels -> Blogger post (draft by default).
 Runs on GitHub Actions. All settings come from environment variables.
 """
 import html
@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -204,8 +206,58 @@ def transcode(src, target, w, h, out):
          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out])
 
 
+# ---------- menu labels (read from the live blog) ----------
+FALLBACK_LABELS = [
+    "Bollywood Content", "Desi Junction", "Dual Audio", "Hindi Dubbed", "Hindi TV Shows",
+    "Web Series", "WWE", "Hollywood Movies", "Malayalam Movies", "Marathi Movies",
+    "Mobile Movies", "Multi Audio", "Pakistani Movies", "PC Games", "Pre Release",
+    "Punjabi Movies", "Single Video Songs", "Tamil Movies", "Telugu Movies", "Trailers",
+    "Uncategorized",
+]
+BLOCKED_LABEL = re.compile(r"18\+|adult|xxx|hevc|x265", re.I)
+
+
+def parse_labels(page):
+    found = re.findall(r"/search/label/([^\"'?&#<>\s/]+)", page)
+    labels, seen = [], set()
+    for f in found:
+        name = urllib.parse.unquote_plus(f).strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            labels.append(name)
+    return labels
+
+
+def get_site_labels():
+    """Read the real label names from the blog's menu, fall back to a built-in list."""
+    labels = []
+    try:
+        url = blogger.blogs().get(blogId=BLOG_ID).execute()["url"]
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        page = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+        labels = parse_labels(page)
+        log(f"  Found {len(labels)} labels on the blog")
+    except Exception as e:  # noqa
+        log("  Could not read blog labels:", e)
+    if len(labels) < 3:
+        have = {l.lower() for l in labels}
+        labels += [l for l in FALLBACK_LABELS if l.lower() not in have]
+    labels = [l for l in labels if not BLOCKED_LABEL.search(l)]
+    return labels[:60]
+
+
+def pick_labels(raw, site_labels):
+    canon = {l.lower(): l for l in site_labels}
+    out = []
+    for r in raw or []:
+        c = canon.get(str(r).strip().lower())
+        if c and c not in out:
+            out.append(c)
+    return out[:4]
+
+
 # ---------- Gemini ----------
-def analyze(filename_hint, frames, audio_bytes):
+def analyze(filename_hint, frames, audio_bytes, site_labels):
     hint = Path(filename_hint).stem.replace("_", " ").replace(".", " ").strip()
     prompt = f"""You are helping publish an ORIGINAL film by its director on a movie blog.
 You get 12 frames spread across the film and an audio sample. The file name hint is: "{hint}".
@@ -216,7 +268,11 @@ Return ONLY JSON with keys:
   genres: list of 1-3 genres (e.g. Drama, Thriller, Romance),
   language: main spoken language,
   release_year: integer (use {datetime.now().year} if unknown),
-  tags: list of up to 6 short keywords.
+  tags: list of up to 6 short keywords,
+  labels: pick 1-4 categories that best fit this film, ONLY from this exact list
+          (copy the spelling exactly): {json.dumps(site_labels)}.
+          Judge by language spoken, film industry/country, and type (movie, web series,
+          trailer, song, etc.). Ignore labels about video encoding or file format.
 Do not invent famous actor names or claim awards."""
     parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
     parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
@@ -240,6 +296,7 @@ Do not invent famous actor names or claim awards."""
         "language": data.get("language") or LANGUAGE_HINT or "Unknown",
         "release_year": data.get("release_year") or datetime.now().year,
         "tags": data.get("tags") or [],
+        "labels": pick_labels(data.get("labels"), site_labels),
     }
 
 
@@ -374,9 +431,11 @@ def process(video, processed_folder, output_folder):
     thumb = make_thumbnail(src, dur, w, h, job)
 
     log("Analysing with Gemini...")
+    site_labels = get_site_labels()
     frames, audio = analysis_inputs(src, dur, job)
-    meta = analyze(name, frames, audio)
+    meta = analyze(name, frames, audio, site_labels)
     log("  Title:", meta["title"])
+    log("  Labels:", meta["labels"])
 
     targets = sorted({t for t in RESOLUTIONS if t <= short * 1.05}) or [short]
     outputs = []
@@ -394,7 +453,10 @@ def process(video, processed_folder, output_folder):
     thumb_id = upload_public(thumb, output_folder, "image/jpeg")
     shot_ids = [upload_public(p, output_folder, "image/jpeg") for p in shots]
 
-    labels = [g for g in meta["genres"]][:3] + [meta["language"], str(meta["release_year"])]
+    labels = list(meta["labels"])
+    if not labels:
+        unc = next((l for l in site_labels if l.lower() == "uncategorized"), None)
+        labels = [unc] if unc else [g for g in meta["genres"]][:2] + [meta["language"]]
     labels = [str(l)[:40] for l in labels if l][:8]
     content = build_html(meta, thumb_id, shot_ids, outputs, fps)
     body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) - Full Movie',
