@@ -1,4 +1,4 @@
-
+"""
 Movie Bot: Drive video -> multi-resolution -> screenshots + 9:16 thumbnail
 -> Gemini title/description -> Blogger post (draft by default).
 Runs on GitHub Actions. All settings come from environment variables.
