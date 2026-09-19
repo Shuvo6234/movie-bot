@@ -31,16 +31,27 @@ BLOG_ID = os.environ["BLOG_ID"]
 INPUT_FOLDER = os.environ["DRIVE_INPUT_FOLDER_ID"]
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-RESOLUTIONS = [int(x) for x in os.environ.get("RESOLUTIONS", "480,720,1080").split(",") if x.strip()]
+RESOLUTIONS = [
+    int(x) for x in os.environ.get("RESOLUTIONS", "480,720,1080").split(",")
+    if x.strip()
+]
 MAX_VIDEOS = int(os.environ.get("MAX_VIDEOS", "1"))
 PUBLISH = os.environ.get("PUBLISH", "false").lower() == "true"
 LANGUAGE_HINT = os.environ.get("LANGUAGE_HINT", "").strip()
 AUDIO_MINUTES = int(os.environ.get("AUDIO_MINUTES", "10"))
 SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
 WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
-CRF = {480: 24, 720: 23, 1080: 22, 1440: 22, 2160: 21}
+
+CRF = {
+    480: 24,
+    720: 23,
+    1080: 22,
+    1440: 22,
+    2160: 21,
+}
 
 WORK = Path("work")
+
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/blogger",
@@ -75,52 +86,124 @@ creds = Credentials(
     client_secret=CLIENT_SECRET,
     scopes=SCOPES,
 )
+
 creds.refresh(Request())
-drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-blogger = build("blogger", "v3", credentials=creds, cache_discovery=False)
+
+drive = build(
+    "drive",
+    "v3",
+    credentials=creds,
+    cache_discovery=False
+)
+
+blogger = build(
+    "blogger",
+    "v3",
+    credentials=creds,
+    cache_discovery=False
+)
+
 gclient = genai.Client(api_key=GEMINI_KEY)
 
 
 # ---------- Drive helpers ----------
 def ensure_folder(name):
-    q = (f"'{INPUT_FOLDER}' in parents and name='{name}' and "
-         "mimeType='application/vnd.google-apps.folder' and trashed=false")
-    res = drive.files().list(q=q, fields="files(id)").execute()
+    q = (
+        f"'{INPUT_FOLDER}' in parents and name='{name}' and "
+        "mimeType='application/vnd.google-apps.folder' and trashed=false"
+    )
+
+    res = drive.files().list(
+        q=q,
+        fields="files(id)"
+    ).execute()
+
     if res["files"]:
         return res["files"][0]["id"]
-    body = {"name": name, "mimeType": "application/vnd.google-apps.folder",
-            "parents": [INPUT_FOLDER]}
-    return drive.files().create(body=body, fields="id").execute()["id"]
+
+    body = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [INPUT_FOLDER]
+    }
+
+    return drive.files().create(
+        body=body,
+        fields="id"
+    ).execute()["id"]
 
 
 def list_videos():
-    q = f"'{INPUT_FOLDER}' in parents and mimeType contains 'video/' and trashed=false"
-    res = drive.files().list(q=q, fields="files(id,name,size)", orderBy="createdTime").execute()
+    q = (
+        f"'{INPUT_FOLDER}' in parents and "
+        "mimeType contains 'video/' and trashed=false"
+    )
+
+    res = drive.files().list(
+        q=q,
+        fields="files(id,name,size)",
+        orderBy="createdTime"
+    ).execute()
+
     return res["files"]
 
 
 def download(file_id, dest):
     req = drive.files().get_media(fileId=file_id)
+
     with open(dest, "wb") as fh:
-        dl = MediaIoBaseDownload(fh, req, chunksize=64 * 1024 * 1024)
+        dl = MediaIoBaseDownload(
+            fh,
+            req,
+            chunksize=64 * 1024 * 1024
+        )
+
         done = False
+
         while not done:
             status, done = retry(dl.next_chunk)
+
             if status:
-                log(f"  download {int(status.progress() * 100)}%")
+                log(
+                    f"  download "
+                    f"{int(status.progress() * 100)}%"
+                )
 
 
 def upload_public(path, parent, mime):
-    media = MediaFileUpload(path, mimetype=mime, resumable=True, chunksize=64 * 1024 * 1024)
+    media = MediaFileUpload(
+        path,
+        mimetype=mime,
+        resumable=True,
+        chunksize=64 * 1024 * 1024
+    )
+
     req = drive.files().create(
-        body={"name": os.path.basename(path), "parents": [parent]},
-        media_body=media, fields="id")
+        body={
+            "name": os.path.basename(path),
+            "parents": [parent]
+        },
+        media_body=media,
+        fields="id"
+    )
+
     resp = None
+
     while resp is None:
         _, resp = retry(req.next_chunk)
+
     fid = resp["id"]
-    retry(lambda: drive.permissions().create(
-        fileId=fid, body={"type": "anyone", "role": "reader"}).execute())
+
+    retry(
+        lambda: drive.permissions().create(
+            fileId=fid,
+            body={
+                "type": "anyone",
+                "role": "reader"
+            }
+        ).execute()
+    )
+
     return fid
 
 
@@ -130,83 +213,239 @@ def parse_fps(*vals):
         try:
             a, b = str(v).split("/")
             a, b = float(a), float(b)
+
             if b and a / b > 0:
                 return a / b
+
         except Exception:  # noqa
             pass
+
     return 30.0
 
 
 def fmt_fps(x):
     r = round(x)
-    return str(r) if abs(x - r) < 0.05 else f"{x:.2f}"
+
+    return (
+        str(r)
+        if abs(x - r) < 0.05
+        else f"{x:.2f}"
+    )
 
 
 def probe(path):
     out = subprocess.check_output([
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate:format=duration",
-        "-of", "json", path])
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate,r_frame_rate:format=duration",
+        "-of",
+        "json",
+        path
+    ])
+
     d = json.loads(out)
     st = d["streams"][0]
-    fps = parse_fps(st.get("avg_frame_rate"), st.get("r_frame_rate"))
-    return float(d["format"]["duration"]), int(st["width"]), int(st["height"]), fps
+
+    fps = parse_fps(
+        st.get("avg_frame_rate"),
+        st.get("r_frame_rate")
+    )
+
+    return (
+        float(d["format"]["duration"]),
+        int(st["width"]),
+        int(st["height"]),
+        fps
+    )
 
 
 def make_screenshots(src, dur, outdir):
     files = []
+
     for i in range(SCREENSHOTS):
         t = dur * (i + 1) / (SCREENSHOTS + 1)
-        p = str(outdir / f"shot_{i + 1}.jpg")
-        run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", src,
-             "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "3", p])
+
+        p = str(
+            outdir / f"shot_{i + 1}.jpg"
+        )
+
+        run([
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{t:.2f}",
+            "-i",
+            src,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=1280:-2",
+            "-q:v",
+            "3",
+            p
+        ])
+
         files.append(p)
+
     return files
 
 
 def make_thumbnail(src, dur, w, h, outdir):
-    """9:16 portrait thumbnail, 720x1280, centre crop from a frame at 35%."""
-    if w * 16 >= h * 9:            # wider than 9:16 -> keep full height
+    # 9:16 portrait thumbnail, 720x1280,
+    # centre crop from a frame at 35%.
+
+    if w * 16 >= h * 9:
         ch = h // 2 * 2
         cw = int(h * 9 / 16) // 2 * 2
-    else:                          # narrower -> keep full width
+
+    else:
         cw = w // 2 * 2
         ch = int(w * 16 / 9) // 2 * 2
-    p = str(outdir / "thumb_9x16.jpg")
-    run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{dur * 0.35:.2f}", "-i", src,
-         "-frames:v", "1", "-vf", f"crop={cw}:{ch},scale=720:1280", "-q:v", "2", p])
+
+    p = str(
+        outdir / "thumb_9x16.jpg"
+    )
+
+    run([
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{dur * 0.35:.2f}",
+        "-i",
+        src,
+        "-frames:v",
+        "1",
+        "-vf",
+        f"crop={cw}:{ch},scale=720:1280",
+        "-q:v",
+        "2",
+        p
+    ])
+
     return p
 
 
 def analysis_inputs(src, dur, outdir):
     frames = []
     n = 12
+
     for i in range(n):
         t = dur * (i + 1) / (n + 1)
+
         p = outdir / f"an_{i}.jpg"
-        run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", src,
-             "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", str(p)])
-        frames.append(p.read_bytes())
+
+        run([
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{t:.2f}",
+            "-i",
+            src,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=512:-2",
+            "-q:v",
+            "5",
+            str(p)
+        ])
+
+        frames.append(
+            p.read_bytes()
+        )
+
     audio = outdir / "an_audio.mp3"
+
     start = dur * 0.10
-    run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{start:.2f}", "-t", str(AUDIO_MINUTES * 60),
-         "-i", src, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", str(audio)])
+
+    run([
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{start:.2f}",
+        "-t",
+        str(AUDIO_MINUTES * 60),
+        "-i",
+        src,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "32k",
+        str(audio)
+    ])
+
     return frames, audio.read_bytes()
 
 
 def transcode(src, target, w, h, out):
-    """target = length of the SHORT side (480/720/1080): works for landscape and vertical."""
+    # target = length of the SHORT side.
+    # Works for landscape and vertical.
+
     crf = CRF.get(target, 23)
-    vf = f"scale=-2:{target}" if w >= h else f"scale={target}:-2"
-    run(["ffmpeg", "-y", "-loglevel", "error", "-stats", "-i", src,
-         "-map", "0:v:0", "-map", "0:a?", "-vf", vf, "-pix_fmt", "yuv420p",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out])
+
+    vf = (
+        f"scale=-2:{target}"
+        if w >= h
+        else f"scale={target}:-2"
+    )
+
+    run([
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-stats",
+        "-i",
+        src,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-vf",
+        vf,
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        str(crf),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        out
+    ])
 
 
 # ---------- Gemini ----------
 def analyze(filename_hint, frames, audio_bytes):
-    hint = Path(filename_hint).stem.replace("_", " ").replace(".", " ").strip()
+    hint = (
+        Path(filename_hint)
+        .stem
+        .replace("_", " ")
+        .replace(".", " ")
+        .strip()
+    )
+
     prompt = f"""You are helping publish an ORIGINAL film by its director on a movie blog.
 You get 12 frames spread across the film and an audio sample. The file name hint is: "{hint}".
 Language hint (may be empty): "{LANGUAGE_HINT}".
@@ -218,212 +457,1128 @@ Return ONLY JSON with keys:
   release_year: integer (use {datetime.now().year} if unknown),
   tags: list of up to 6 short keywords.
 Do not invent famous actor names or claim awards."""
-    parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
-    parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
+
+    parts = [
+        types.Part.from_bytes(
+            data=b,
+            mime_type="image/jpeg"
+        )
+        for b in frames
+    ]
+
+    parts.append(
+        types.Part.from_bytes(
+            data=audio_bytes,
+            mime_type="audio/mp3"
+        )
+    )
+
     data = {}
-    for model in dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest"]):
+
+    for model in dict.fromkeys([
+        GEMINI_MODEL,
+        "gemini-flash-latest"
+    ]):
+
         try:
-            resp = retry(lambda: gclient.models.generate_content(
-                model=model, contents=[prompt, *parts],
-                config=types.GenerateContentConfig(response_mime_type="application/json")), tries=2)
-            data = json.loads(re.sub(r"^```json|```$", "", resp.text.strip()).strip())
-            log("  Gemini model used:", model)
+            resp = retry(
+                lambda: gclient.models.generate_content(
+                    model=model,
+                    contents=[
+                        prompt,
+                        *parts
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json"
+                    )
+                ),
+                tries=2
+            )
+
+            data = json.loads(
+                re.sub(
+                    r"^```json|```$",
+                    "",
+                    resp.text.strip()
+                ).strip()
+            )
+
+            log(
+                "  Gemini model used:",
+                model
+            )
+
             break
+
         except Exception as e:  # noqa
-            log(f"  Gemini model {model} failed: {e}")
+            log(
+                f"  Gemini model {model} failed: {e}"
+            )
+
     if not data:
         log("  Using fallback text.")
+
     return {
-        "title": data.get("title") or hint or "Untitled Film",
-        "synopsis": data.get("synopsis") or "An original film.",
-        "genres": data.get("genres") or ["Drama"],
-        "language": data.get("language") or LANGUAGE_HINT or "Unknown",
-        "release_year": data.get("release_year") or datetime.now().year,
-        "tags": data.get("tags") or [],
+        "title": (
+            data.get("title")
+            or hint
+            or "Untitled Film"
+        ),
+
+        "synopsis": (
+            data.get("synopsis")
+            or "An original film."
+        ),
+
+        "genres": (
+            data.get("genres")
+            or ["Drama"]
+        ),
+
+        "language": (
+            data.get("language")
+            or LANGUAGE_HINT
+            or "Unknown"
+        ),
+
+        "release_year": (
+            data.get("release_year")
+            or datetime.now().year
+        ),
+
+        "tags": (
+            data.get("tags")
+            or []
+        ),
     }
 
 
 # ---------- post HTML ----------
 def human(n):
     n = float(n)
+
     if n >= 1024 ** 3:
         return f"{n / 1024 ** 3:.1f}GB"
+
     return f"{n / 1024 ** 2:.0f}MB"
 
 
 def img_url(fid):
-    return f"https://lh3.googleusercontent.com/d/{fid}"
+    return (
+        f"https://lh3.googleusercontent.com/d/{fid}"
+    )
 
 
 TIMER_SCRIPT = """<script>
 (function () {
   var WAIT = %d;
   var btns = document.querySelectorAll('a.mv-dl[data-fid]');
+
   for (var i = 0; i < btns.length; i++) {
     (function (b) {
       var label = b.innerHTML;
       var busy = false;
+
       b.addEventListener('click', function (e) {
         e.preventDefault();
-        if (busy) { return; }
+
+        if (busy) {
+          return;
+        }
+
         busy = true;
+
         var left = WAIT;
+
         b.style.opacity = '0.85';
-        b.innerHTML = 'Please wait ' + left + ' seconds...';
+
+        b.innerHTML =
+          'Please wait ' +
+          left +
+          ' seconds...';
+
         var t = setInterval(function () {
           left--;
+
           if (left > 0) {
-            b.innerHTML = 'Please wait ' + left + ' seconds...';
+            b.innerHTML =
+              'Please wait ' +
+              left +
+              ' seconds...';
+
             return;
           }
+
           clearInterval(t);
-          b.innerHTML = 'Download starting...';
-          window.location.href = 'https://drive.usercontent.google.com/download?id=' +
-            b.getAttribute('data-fid') + '&export=download&confirm=t';
+
+          b.innerHTML =
+            'Download starting...';
+
+          window.location.href =
+            'https://drive.usercontent.google.com/download?id=' +
+            b.getAttribute('data-fid') +
+            '&export=download&confirm=t';
+
           setTimeout(function () {
             b.innerHTML = label;
             b.style.opacity = '1';
             busy = false;
           }, 6000);
+
         }, 1000);
       });
+
     })(btns[i]);
   }
+
 })();
 </script>""" % WAIT_SECONDS
 
 
-def build_html(meta, thumb_id, shot_ids, outputs, fps):
-    e = html.escape
-    title = e(meta["title"])
-    year = meta["release_year"]
-    lang = e(meta["language"])
-    genres = ", ".join(e(g) for g in meta["genres"])
-    fps_txt = fmt_fps(fps)
-    qualities = " - ".join(f"{h}p" for h, _, _ in outputs)
-    sizes = " - ".join(human(s) for _, _, s in outputs)
-    player_id = next((fid for h, fid, _ in outputs if h == 720), outputs[-1][1])
+# ---------- CUSTOM VIDEO PLAYER ----------
+def build_player(player_id, title, year, lang):
+    return f'''
+<div class="custom-movie-player"
+     style="
+       position:relative;
+       width:100%;
+       max-width:100%;
+       background:#000;
+       overflow:hidden;
+       border-radius:4px;
+       color:#fff;
+       font-family:Arial,sans-serif;
+     ">
 
-    btn = ("display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
-           "text-align:center;color:#fff;font-weight:800;font-size:19px;"
-           "text-decoration:none;cursor:pointer;"
-           "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
-           "box-shadow:0 8px 14px rgba(0,0,0,.45);")
-    head = ("text-align:center;color:#fff;font-size:21px;line-height:1.4;"
-            "margin:28px 0 18px;font-weight:800")
-    hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.6);margin:22px 0"/>'
+  <video id="moviePlayer"
+         preload="metadata"
+         playsinline
+         style="
+           display:block;
+           width:100%;
+           height:auto;
+           max-height:520px;
+           background:#000;
+         ">
+
+    <source
+      src="https://drive.usercontent.google.com/download?id={player_id}&export=download&confirm=t"
+      type="video/mp4">
+
+  </video>
+
+
+  <!-- TOP TITLE -->
+
+  <div style="
+      position:absolute;
+      top:0;
+      left:0;
+      right:0;
+      padding:16px 18px;
+      text-align:center;
+      font-size:20px;
+      font-weight:700;
+      background:linear-gradient(
+        to bottom,
+        rgba(0,0,0,.90),
+        transparent
+      );
+      pointer-events:none;
+  ">
+    ▶ &nbsp; {title} ({year})
+  </div>
+
+
+  <!-- LANGUAGE BADGE -->
+
+  <div style="
+      position:absolute;
+      top:16px;
+      left:16px;
+      background:#006b00;
+      padding:10px 20px;
+      border-radius:7px;
+      font-size:18px;
+      font-weight:700;
+  ">
+    {lang}
+  </div>
+
+
+  <!-- BIG PLAY BUTTON -->
+
+  <button
+      type="button"
+      onclick="moviePlayToggle()"
+      id="movieBigPlay"
+      style="
+        position:absolute;
+        top:50%;
+        left:50%;
+        transform:translate(-50%,-50%);
+        width:100px;
+        height:100px;
+        border:0;
+        border-radius:50%;
+        background:#006b00;
+        color:#fff;
+        font-size:45px;
+        cursor:pointer;
+      ">
+    ▶
+  </button>
+
+
+  <!-- CONTROLS -->
+
+  <div style="
+      position:absolute;
+      left:18px;
+      right:18px;
+      bottom:12px;
+  ">
+
+    <input
+      id="movieSeek"
+      type="range"
+      min="0"
+      value="0"
+      step="0.1"
+      style="
+        width:100%;
+        cursor:pointer;
+      ">
+
+
+    <div style="
+        display:flex;
+        align-items:center;
+        gap:18px;
+        margin-top:8px;
+        font-size:17px;
+    ">
+
+
+      <!-- PLAY / PAUSE -->
+
+      <button
+          type="button"
+          onclick="moviePlayToggle()"
+          id="moviePlayBtn"
+          style="
+            background:none;
+            border:0;
+            color:#fff;
+            font-size:25px;
+            cursor:pointer;
+          ">
+        ▶
+      </button>
+
+
+      <!-- TIME -->
+
+      <span id="movieTime">
+        0:00 - 0:00
+      </span>
+
+
+      <!-- MUTE -->
+
+      <button
+          type="button"
+          onclick="movieMuteToggle()"
+          id="movieMuteBtn"
+          style="
+            background:none;
+            border:0;
+            color:#fff;
+            font-size:22px;
+            cursor:pointer;
+          ">
+        🔊
+      </button>
+
+
+      <!-- FULLSCREEN -->
+
+      <button
+          type="button"
+          onclick="movieFullscreen()"
+          style="
+            margin-left:auto;
+            background:none;
+            border:0;
+            color:#fff;
+            font-size:25px;
+            cursor:pointer;
+          ">
+        ⛶
+      </button>
+
+    </div>
+
+  </div>
+
+</div>
+
+
+<script>
+(function() {{
+
+  var v =
+    document.getElementById("moviePlayer");
+
+  var big =
+    document.getElementById("movieBigPlay");
+
+  var play =
+    document.getElementById("moviePlayBtn");
+
+  var seek =
+    document.getElementById("movieSeek");
+
+  var time =
+    document.getElementById("movieTime");
+
+  var mute =
+    document.getElementById("movieMuteBtn");
+
+
+  if (!v) {{
+    return;
+  }}
+
+
+  function formatTime(s) {{
+
+    if (!isFinite(s)) {{
+      return "0:00";
+    }}
+
+    var h =
+      Math.floor(s / 3600);
+
+    var m =
+      Math.floor((s % 3600) / 60);
+
+    var sec =
+      Math.floor(s % 60);
+
+
+    if (h > 0) {{
+
+      return (
+        h +
+        ":" +
+        String(m).padStart(2, "0") +
+        ":" +
+        String(sec).padStart(2, "0")
+      );
+
+    }}
+
+
+    return (
+      m +
+      ":" +
+      String(sec).padStart(2, "0")
+    );
+
+  }}
+
+
+  function update() {{
+
+    seek.value =
+      v.currentTime || 0;
+
+    seek.max =
+      v.duration || 0;
+
+    time.textContent =
+      formatTime(v.currentTime) +
+      " - " +
+      formatTime(v.duration);
+
+  }}
+
+
+  window.moviePlayToggle =
+    function() {{
+
+      if (v.paused) {{
+
+        v.play().catch(
+          function() {{}}
+        );
+
+      }} else {{
+
+        v.pause();
+
+      }}
+
+    }};
+
+
+  window.movieMuteToggle =
+    function() {{
+
+      v.muted =
+        !v.muted;
+
+      mute.textContent =
+        v.muted
+        ? "🔇"
+        : "🔊";
+
+    }};
+
+
+  window.movieFullscreen =
+    function() {{
+
+      var box =
+        v.parentElement;
+
+      if (box.requestFullscreen) {{
+
+        box.requestFullscreen();
+
+      }} else if (v.webkitEnterFullscreen) {{
+
+        v.webkitEnterFullscreen();
+
+      }}
+
+    }};
+
+
+  v.addEventListener(
+    "play",
+    function() {{
+
+      big.style.display =
+        "none";
+
+      play.textContent =
+        "❚❚";
+
+    }}
+  );
+
+
+  v.addEventListener(
+    "pause",
+    function() {{
+
+      big.style.display =
+        "block";
+
+      play.textContent =
+        "▶";
+
+    }}
+  );
+
+
+  v.addEventListener(
+    "timeupdate",
+    update
+  );
+
+
+  v.addEventListener(
+    "loadedmetadata",
+    update
+  );
+
+
+  seek.addEventListener(
+    "input",
+    function() {{
+
+      v.currentTime =
+        parseFloat(this.value);
+
+    }}
+  );
+
+
+}})();
+</script>
+'''
+
+
+def build_html(
+    meta,
+    thumb_id,
+    shot_ids,
+    outputs,
+    fps
+):
+    e = html.escape
+
+    title = e(
+        meta["title"]
+    )
+
+    year = meta["release_year"]
+
+    lang = e(
+        meta["language"]
+    )
+
+    genres = ", ".join(
+        e(g)
+        for g in meta["genres"]
+    )
+
+    fps_txt = fmt_fps(fps)
+
+    qualities = " - ".join(
+        f"{h}p"
+        for h, _, _ in outputs
+    )
+
+    sizes = " - ".join(
+        human(s)
+        for _, _, s in outputs
+    )
+
+
+    # 720p player if available.
+    # Otherwise use the last generated quality.
+
+    player_id = next(
+        (
+            fid
+            for h, fid, _
+            in outputs
+            if h == 720
+        ),
+        outputs[-1][1]
+    )
+
+
+    btn = (
+        "display:block;"
+        "width:260px;"
+        "max-width:90%;"
+        "margin:0 auto 28px;"
+        "padding:18px 10px;"
+        "text-align:center;"
+        "color:#fff;"
+        "font-weight:800;"
+        "font-size:19px;"
+        "text-decoration:none;"
+        "cursor:pointer;"
+        "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
+        "box-shadow:0 8px 14px rgba(0,0,0,.45);"
+    )
+
+
+    head = (
+        "text-align:center;"
+        "color:#fff;"
+        "font-size:21px;"
+        "line-height:1.4;"
+        "margin:28px 0 18px;"
+        "font-weight:800"
+    )
+
+
+    hr = (
+        '<hr style="'
+        'border:0;'
+        'border-top:1px solid rgba(255,255,255,.6);'
+        'margin:22px 0"/>'
+    )
+
+
+    # Build custom player
+
+    player = build_player(
+        player_id,
+        title,
+        year,
+        lang
+    )
+
 
     parts = [
-        f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title}" '
-        f'width="270" style="max-width:60%;height:auto;border-radius:8px"/></div>',
-        f'<p style="text-align:center"><b>Download {title} ({year}) - Full Movie</b></p>',
+
+        f'''
+        <div style="text-align:center">
+          <img
+            src="{img_url(thumb_id)}"
+            alt="{title}"
+            width="270"
+            style="
+              max-width:60%;
+              height:auto;
+              border-radius:8px;
+            "
+          />
+        </div>
+        ''',
+
+        f'''
+        <p style="text-align:center">
+          <b>
+            Download {title} ({year}) - Full Movie
+          </b>
+        </p>
+        ''',
+
         '<h3 style="text-align:center">Movie Info</h3>',
-        f'<p><b>Movie Name:</b> {title}<br/>'
-        f'<b>Release Year:</b> {year}<br/>'
-        f'<b>Language:</b> {lang}<br/>'
-        f'<b>Quality:</b> {qualities}<br/>'
-        f'<b>Frame Rate:</b> {fps_txt}fps<br/>'
-        f'<b>Size:</b> {sizes}<br/>'
-        f'<b>Genres:</b> {genres}</p>',
+
+        f'''
+        <p>
+          <b>Movie Name:</b> {title}<br/>
+          <b>Release Year:</b> {year}<br/>
+          <b>Language:</b> {lang}<br/>
+          <b>Quality:</b> {qualities}<br/>
+          <b>Frame Rate:</b> {fps_txt}fps<br/>
+          <b>Size:</b> {sizes}<br/>
+          <b>Genres:</b> {genres}
+        </p>
+        ''',
+
         '<h3 style="text-align:center">Movie-SYNOPSIS/PLOT:</h3>',
-        f'<p>{e(meta["synopsis"])}</p>',
+
+        f'''
+        <p>
+          {e(meta["synopsis"])}
+        </p>
+        ''',
+
         f'<h3>Watch {title} Online</h3>',
-        f'<iframe src="https://drive.google.com/file/d/{player_id}/preview" '
-        'width="100%" height="420" allow="autoplay" allowfullscreen="true" '
-        'style="border:0;max-width:100%"></iframe>',
-        '<h3 style="text-align:center">Screenshots: (Must See Before Downloading)...</h3>',
+
+        # NEW CUSTOM PLAYER
+        player,
+
+        '<h3 style="text-align:center">'
+        'Screenshots: (Must See Before Downloading)...'
+        '</h3>',
     ]
+
+
+    # ---------- screenshots ----------
+
     for fid in shot_ids:
-        parts.append(f'<p style="text-align:center"><img src="{img_url(fid)}" alt="{title} screenshot" '
-                     'style="max-width:100%;height:auto"/></p>')
+
+        parts.append(
+            f'''
+            <p style="text-align:center">
+              <img
+                src="{img_url(fid)}"
+                alt="{title} screenshot"
+                style="
+                  max-width:100%;
+                  height:auto;
+                "
+              />
+            </p>
+            '''
+        )
+
+
     parts.append(hr)
-    parts.append('<h3 style="text-align:center">Download Links</h3>')
+
+    parts.append(
+        '<h3 style="text-align:center">'
+        'Download Links'
+        '</h3>'
+    )
+
+
+    # ---------- download links ----------
+
     for h, fid, size in outputs:
-        direct = (f"https://drive.usercontent.google.com/download?id={fid}"
-                  "&amp;export=download&amp;confirm=t")
+
+        direct = (
+            f"https://drive.usercontent.google.com/"
+            f"download?id={fid}"
+            "&amp;export=download"
+            "&amp;confirm=t"
+        )
+
+
         parts.append(
-            f'<h4 style="{head}">{title} ({year}) '
-            f'<span style="color:#f2f200">{{{lang}}}</span> '
-            f'{h}p x264 {fps_txt}fps [{human(size)}]</h4>')
+            f'''
+            <h4 style="{head}">
+              {title} ({year})
+              <span style="color:#f2f200">
+                {{{lang}}}
+              </span>
+              {h}p x264 {fps_txt}fps
+              [{human(size)}]
+            </h4>
+            '''
+        )
+
+
         parts.append(
-            f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
-            '&#11015;&#9889;DOWNLOAD NOW&#9889;&#11015;</a>')
+            f'''
+            <a
+              class="mv-dl"
+              data-fid="{fid}"
+              href="{direct}"
+              rel="noopener"
+              style="{btn}"
+            >
+              &#11015;&#9889;
+              DOWNLOAD NOW
+              &#9889;&#11015;
+            </a>
+            '''
+        )
+
+
     parts.append(hr)
-    parts.append('<h3 style="text-align:center;color:#f0a0ff">Winding Up &#10084;&#65039;</h3>')
-    parts.append(TIMER_SCRIPT)
+
+
+    parts.append(
+        '<h3 style="'
+        'text-align:center;'
+        'color:#f0a0ff'
+        '">'
+        'Winding Up &#10084;&#65039;'
+        '</h3>'
+    )
+
+
+    parts.append(
+        TIMER_SCRIPT
+    )
+
+
     return "\n".join(parts)
 
 
 # ---------- main pipeline ----------
-def process(video, processed_folder, output_folder):
+def process(
+    video,
+    processed_folder,
+    output_folder
+):
     name = video["name"]
-    log(f"\n=== Processing: {name} ===")
-    job = WORK / video["id"]
-    job.mkdir(parents=True, exist_ok=True)
-    src = str(job / "source.mp4")
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", Path(name).stem).strip("-").lower() or "movie"
 
-    log("Downloading original...")
-    download(video["id"], src)
-    dur, w, h, fps = probe(src)
-    short = min(w, h)
-    log(f"Duration {dur / 60:.1f} min, {w}x{h}, {fps:.2f} fps")
+    log(
+        f"\n=== Processing: {name} ==="
+    )
 
-    log("Making screenshots and thumbnail...")
-    shots = make_screenshots(src, dur, job)
-    thumb = make_thumbnail(src, dur, w, h, job)
 
-    log("Analysing with Gemini...")
-    frames, audio = analysis_inputs(src, dur, job)
-    meta = analyze(name, frames, audio)
-    log("  Title:", meta["title"])
+    job = (
+        WORK /
+        video["id"]
+    )
 
-    targets = sorted({t for t in RESOLUTIONS if t <= short * 1.05}) or [short]
+    job.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+
+    src = str(
+        job / "source.mp4"
+    )
+
+
+    slug = (
+        re.sub(
+            r"[^a-zA-Z0-9]+",
+            "-",
+            Path(name).stem
+        )
+        .strip("-")
+        .lower()
+        or "movie"
+    )
+
+
+    log(
+        "Downloading original..."
+    )
+
+    download(
+        video["id"],
+        src
+    )
+
+
+    dur, w, h, fps = probe(
+        src
+    )
+
+    short = min(
+        w,
+        h
+    )
+
+
+    log(
+        f"Duration {dur / 60:.1f} min, "
+        f"{w}x{h}, "
+        f"{fps:.2f} fps"
+    )
+
+
+    log(
+        "Making screenshots and thumbnail..."
+    )
+
+
+    shots = make_screenshots(
+        src,
+        dur,
+        job
+    )
+
+
+    thumb = make_thumbnail(
+        src,
+        dur,
+        w,
+        h,
+        job
+    )
+
+
+    log(
+        "Analysing with Gemini..."
+    )
+
+
+    frames, audio = analysis_inputs(
+        src,
+        dur,
+        job
+    )
+
+
+    meta = analyze(
+        name,
+        frames,
+        audio
+    )
+
+
+    log(
+        "  Title:",
+        meta["title"]
+    )
+
+
+    targets = sorted(
+        {
+            t
+            for t in RESOLUTIONS
+            if t <= short * 1.05
+        }
+    ) or [short]
+
+
     outputs = []
+
+
     for t in targets:
-        out = str(job / f"{slug}_{t}p.mp4")
-        log(f"Converting to {t}p...")
-        transcode(src, t, w, h, out)
-        size = os.path.getsize(out)
-        log(f"Uploading {t}p ({human(size)})...")
-        fid = upload_public(out, output_folder, "video/mp4")
-        outputs.append((t, fid, size))
-        os.remove(out)  # free disk
 
-    log("Uploading images...")
-    thumb_id = upload_public(thumb, output_folder, "image/jpeg")
-    shot_ids = [upload_public(p, output_folder, "image/jpeg") for p in shots]
+        out = str(
+            job /
+            f"{slug}_{t}p.mp4"
+        )
 
-    labels = [g for g in meta["genres"]][:3] + [meta["language"], str(meta["release_year"])]
-    labels = [str(l)[:40] for l in labels if l][:8]
-    content = build_html(meta, thumb_id, shot_ids, outputs, fps)
-    body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) - Full Movie',
-            "content": content, "labels": labels}
-    post = retry(lambda: blogger.posts().insert(
-        blogId=BLOG_ID, body=body, isDraft=not PUBLISH).execute())
-    log("Blogger post created:", post.get("url") or post.get("id"),
-        "(DRAFT)" if not PUBLISH else "(PUBLISHED)")
 
-    drive.files().update(fileId=video["id"], addParents=processed_folder,
-                         removeParents=INPUT_FOLDER, fields="id").execute()
-    shutil.rmtree(job, ignore_errors=True)
+        log(
+            f"Converting to {t}p..."
+        )
+
+
+        transcode(
+            src,
+            t,
+            w,
+            h,
+            out
+        )
+
+
+        size = os.path.getsize(
+            out
+        )
+
+
+        log(
+            f"Uploading {t}p "
+            f"({human(size)})..."
+        )
+
+
+        fid = upload_public(
+            out,
+            output_folder,
+            "video/mp4"
+        )
+
+
+        outputs.append(
+            (
+                t,
+                fid,
+                size
+            )
+        )
+
+
+        os.remove(out)
+
+
+    log(
+        "Uploading images..."
+    )
+
+
+    thumb_id = upload_public(
+        thumb,
+        output_folder,
+        "image/jpeg"
+    )
+
+
+    shot_ids = [
+        upload_public(
+            p,
+            output_folder,
+            "image/jpeg"
+        )
+        for p in shots
+    ]
+
+
+    labels = (
+        [g for g in meta["genres"]][:3]
+        +
+        [
+            meta["language"],
+            str(meta["release_year"])
+        ]
+    )
+
+
+    labels = [
+        str(l)[:40]
+        for l in labels
+        if l
+    ][:8]
+
+
+    content = build_html(
+        meta,
+        thumb_id,
+        shot_ids,
+        outputs,
+        fps
+    )
+
+
+    body = {
+        "kind": "blogger#post",
+        "title": (
+            f'{meta["title"]} '
+            f'({meta["release_year"]}) '
+            f'- Full Movie'
+        ),
+        "content": content,
+        "labels": labels
+    }
+
+
+    post = retry(
+        lambda: blogger.posts().insert(
+            blogId=BLOG_ID,
+            body=body,
+            isDraft=not PUBLISH
+        ).execute()
+    )
+
+
+    log(
+        "Blogger post created:",
+        post.get("url")
+        or post.get("id"),
+        "(DRAFT)"
+        if not PUBLISH
+        else "(PUBLISHED)"
+    )
+
+
+    drive.files().update(
+        fileId=video["id"],
+        addParents=processed_folder,
+        removeParents=INPUT_FOLDER,
+        fields="id"
+    ).execute()
+
+
+    shutil.rmtree(
+        job,
+        ignore_errors=True
+    )
 
 
 def main():
-    WORK.mkdir(exist_ok=True)
+
+    WORK.mkdir(
+        exist_ok=True
+    )
+
+
     videos = list_videos()
+
+
     if not videos:
-        log("No new videos in the input folder. Nothing to do.")
+
+        log(
+            "No new videos in the input folder. "
+            "Nothing to do."
+        )
+
         return 0
-    processed = ensure_folder("_processed")
-    output = ensure_folder("_output")
+
+
+    processed = ensure_folder(
+        "_processed"
+    )
+
+    output = ensure_folder(
+        "_output"
+    )
+
+
     failed = 0
+
+
     for v in videos[:MAX_VIDEOS]:
+
         try:
-            process(v, processed, output)
+
+            process(
+                v,
+                processed,
+                output
+            )
+
         except Exception:  # noqa
+
             failed += 1
+
             traceback.print_exc()
+
+
     return 1 if failed else 0
 
 
