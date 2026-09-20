@@ -427,6 +427,7 @@ def render_player(player_id, title, outputs):
     # join everything into one line so Blogger never inserts <br> for line breaks
     tpl = " ".join(l.strip() for l in tpl.splitlines() if l.strip())
     sources = json.dumps([{"quality": f"{h}p", "id": fid} for h, fid, _ in outputs])
+    log(f"  Custom player loaded from player.html ({len(tpl)} chars)")
     return (tpl.replace("__VIDEO_ID__", player_id)
                .replace("__TITLE__", html.escape(title))
                .replace("__SOURCES_JSON__", sources))
