@@ -40,6 +40,7 @@ LANGUAGE_HINT = os.environ.get("LANGUAGE_HINT", "").strip()
 AUDIO_MINUTES = int(os.environ.get("AUDIO_MINUTES", "10"))
 SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
 WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
+DIRECTOR_NAME = os.environ.get("DIRECTOR_NAME", "").strip()
 CRF = {480: 24, 720: 23, 1080: 22, 1440: 22, 2160: 21}
 
 WORK = Path("work")
@@ -257,23 +258,56 @@ def pick_labels(raw, site_labels):
 
 
 # ---------- Gemini ----------
+def as_paragraphs(v):
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [p.strip() for p in re.split(r"\n\s*\n", str(v or "")) if p.strip()]
+
+
+def clean_hint(filename):
+    t = Path(filename).stem
+    t = re.sub(r"[#@]\S+", " ", t)                     # hashtags / mentions
+    t = re.sub(r"[_.\-]+", " ", t)
+    t = re.sub(r"[^\w\s]", " ", t, flags=re.UNICODE)   # emojis and symbols
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def analyze(filename_hint, frames, audio_bytes, site_labels):
-    hint = Path(filename_hint).stem.replace("_", " ").replace(".", " ").strip()
-    prompt = f"""You are helping publish an ORIGINAL film by its director on a movie blog.
-You get 12 frames spread across the film and an audio sample. The file name hint is: "{hint}".
-Language hint (may be empty): "{LANGUAGE_HINT}".
-Return ONLY JSON with keys:
-  title: catchy movie title (use the file name hint if it looks like a real title),
-  synopsis: 3-4 sentence spoiler-light plot description in English, based on what you see/hear,
-  genres: list of 1-3 genres (e.g. Drama, Thriller, Romance),
+    hint = clean_hint(filename_hint)
+    year = datetime.now().year
+    prompt = f"""You are a film writer. You are publishing an ORIGINAL film, on its own director's film
+blog. You get 12 frames spread across the film and an audio sample.
+File name hint (may be messy): "{hint}". Language hint (may be empty): "{LANGUAGE_HINT}".
+Director name (may be empty): "{DIRECTOR_NAME}".
+
+Rules:
+- Write everything in your own words, in natural English. Never copy text from any website, film or review.
+- Base it ONLY on what you can actually see and hear in the frames and audio. If you are unsure,
+  stay general and talk about mood, visuals, sound and themes instead of specific plot facts.
+- Never invent cast, crew, awards, festivals, ratings, box office or plot facts you cannot see.
+- No piracy words (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
+- The title must be a real film title of 1-6 words. No hashtags, emojis or words like "trending reels".
+  If the file name hint is messy, invent a fitting title from what the film is about.
+
+Return ONLY JSON with these keys:
+  title: the film title,
+  tagline: one sentence, max 20 words,
+  synopsis: 2 short paragraphs (about 120 words), spoiler-light, separated by a blank line,
+  review: 3-4 paragraphs (about 300 words) analysing tone, visual style and camera work, sound and
+          music, performances in general terms, themes and who will enjoy the film,
+          separated by blank lines,
+  themes: list of 3-5 short phrases,
+  faq: list of 4 objects {{"q": "...", "a": "..."}} with 1-2 sentence answers about the film
+       (genre, language, mood, who it suits, runtime feel),
+  genres: list of 1-3 genres,
   language: main spoken language,
-  release_year: integer (use {datetime.now().year} if unknown),
+  release_year: integer (use {year} if unknown),
+  content_rating: one of "General audience", "Teen and above", "Mature audience",
   tags: list of up to 6 short keywords,
   labels: pick 1-4 categories that best fit this film, ONLY from this exact list
           (copy the spelling exactly): {json.dumps(site_labels)}.
           Judge by language spoken, film industry/country, and type (movie, web series,
-          trailer, song, etc.). Ignore labels about video encoding or file format.
-Do not invent famous actor names or claim awards."""
+          trailer, song, etc.). Ignore labels about video encoding or file format."""
     parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
     parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
     data = {}
@@ -289,12 +323,18 @@ Do not invent famous actor names or claim awards."""
             log(f"  Gemini model {model} failed: {e}")
     if not data:
         log("  Using fallback text.")
+    faq = [f for f in (data.get("faq") or []) if isinstance(f, dict) and f.get("q") and f.get("a")]
     return {
         "title": data.get("title") or hint or "Untitled Film",
-        "synopsis": data.get("synopsis") or "An original film.",
+        "tagline": data.get("tagline") or "",
+        "synopsis": as_paragraphs(data.get("synopsis")) or ["An original film."],
+        "review": as_paragraphs(data.get("review")),
+        "themes": [str(t) for t in (data.get("themes") or [])][:5],
+        "faq": faq[:4],
         "genres": data.get("genres") or ["Drama"],
         "language": data.get("language") or LANGUAGE_HINT or "Unknown",
-        "release_year": data.get("release_year") or datetime.now().year,
+        "release_year": data.get("release_year") or year,
+        "content_rating": data.get("content_rating") or "General audience",
         "tags": data.get("tags") or [],
         "labels": pick_labels(data.get("labels"), site_labels),
     }
@@ -306,6 +346,16 @@ def human(n):
     if n >= 1024 ** 3:
         return f"{n / 1024 ** 3:.1f}GB"
     return f"{n / 1024 ** 2:.0f}MB"
+
+
+def fmt_runtime(sec):
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec} sec"
+    m = sec // 60
+    if m < 60:
+        return f"{m} min"
+    return f"{m // 60} h {m % 60} min"
 
 
 def img_url(fid):
@@ -350,7 +400,7 @@ TIMER_SCRIPT = """<script>
 </script>""" % WAIT_SECONDS
 
 
-def build_html(meta, thumb_id, shot_ids, outputs, fps):
+def build_html(meta, thumb_id, shot_ids, outputs, fps, dur):
     e = html.escape
     title = e(meta["title"])
     year = meta["release_year"]
@@ -360,6 +410,8 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps):
     qualities = " - ".join(f"{h}p" for h, _, _ in outputs)
     sizes = " - ".join(human(s) for _, _, s in outputs)
     player_id = next((fid for h, fid, _ in outputs if h == 720), outputs[-1][1])
+    syn = [e(p) for p in meta["synopsis"]]
+    review = [e(p) for p in meta["review"]]
 
     btn = ("display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
            "text-align:center;color:#fff;font-weight:800;font-size:19px;"
@@ -369,32 +421,50 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps):
     head = ("text-align:center;color:#fff;font-size:21px;line-height:1.4;"
             "margin:28px 0 18px;font-weight:800")
     hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.6);margin:22px 0"/>'
+    h3 = '<h3 style="text-align:center">{}</h3>'
+
+    info = [f"<b>Movie Name:</b> {title}", f"<b>Release Year:</b> {year}"]
+    if DIRECTOR_NAME:
+        info.append(f"<b>Directed by:</b> {e(DIRECTOR_NAME)}")
+    info += [
+        f"<b>Language:</b> {lang}",
+        f"<b>Runtime:</b> {fmt_runtime(dur)}",
+        f"<b>Genres:</b> {genres}",
+        f"<b>Content Advisory:</b> {e(meta['content_rating'])}",
+        f"<b>Quality:</b> {qualities}",
+        f"<b>Frame Rate:</b> {fps_txt}fps",
+        f"<b>Size:</b> {sizes}",
+    ]
 
     parts = [
         f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title}" '
         f'width="270" style="max-width:60%;height:auto;border-radius:8px"/></div>',
-        f'<p style="text-align:center"><b>Download {title} ({year}) - Full Movie</b></p>',
-        '<h3 style="text-align:center">Movie Info</h3>',
-        f'<p><b>Movie Name:</b> {title}<br/>'
-        f'<b>Release Year:</b> {year}<br/>'
-        f'<b>Language:</b> {lang}<br/>'
-        f'<b>Quality:</b> {qualities}<br/>'
-        f'<b>Frame Rate:</b> {fps_txt}fps<br/>'
-        f'<b>Size:</b> {sizes}<br/>'
-        f'<b>Genres:</b> {genres}</p>',
-        '<h3 style="text-align:center">Movie-SYNOPSIS/PLOT:</h3>',
-        f'<p>{e(meta["synopsis"])}</p>',
-        f'<h3>Watch {title} Online</h3>',
+        f'<p style="text-align:center"><b>{title} ({year})</b> - {lang} film</p>',
+    ]
+    if meta["tagline"]:
+        parts.append(f'<p style="text-align:center"><i>{e(meta["tagline"])}</i></p>')
+    parts.append(f"<p>{syn[0]}</p>")
+    parts.append(h3.format("Movie Info"))
+    parts.append("<p>" + "<br/>".join(info) + "</p>")
+    parts.append(h3.format("Movie Synopsis / Plot"))
+    parts += [f"<p>{p}</p>" for p in syn]
+    parts.append(f"<h3>Watch {title} Online</h3>")
+    parts.append(
         f'<iframe src="https://drive.google.com/file/d/{player_id}/preview" '
         'width="100%" height="420" allow="autoplay" allowfullscreen="true" '
-        'style="border:0;max-width:100%"></iframe>',
-        '<h3 style="text-align:center">Screenshots: (Must See Before Downloading)...</h3>',
-    ]
+        'style="border:0;max-width:100%"></iframe>')
+    if review:
+        parts.append(h3.format(f"{title} - Film Review and Analysis"))
+        parts += [f"<p>{p}</p>" for p in review]
+    if meta["themes"]:
+        parts.append(h3.format("Themes"))
+        parts.append("<ul>" + "".join(f"<li>{e(t)}</li>" for t in meta["themes"]) + "</ul>")
+    parts.append(h3.format("Screenshots"))
     for fid in shot_ids:
         parts.append(f'<p style="text-align:center"><img src="{img_url(fid)}" alt="{title} screenshot" '
                      'style="max-width:100%;height:auto"/></p>')
     parts.append(hr)
-    parts.append('<h3 style="text-align:center">Download Links</h3>')
+    parts.append(h3.format("Download Links"))
     for h, fid, size in outputs:
         direct = (f"https://drive.usercontent.google.com/download?id={fid}"
                   "&amp;export=download&amp;confirm=t")
@@ -406,6 +476,10 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps):
             f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
             '&#11015;&#9889;DOWNLOAD NOW&#9889;&#11015;</a>')
     parts.append(hr)
+    if meta["faq"]:
+        parts.append(h3.format(f"{title} - FAQ"))
+        for f in meta["faq"]:
+            parts.append(f"<h4>{e(str(f['q']))}</h4><p>{e(str(f['a']))}</p>")
     parts.append('<h3 style="text-align:center;color:#f0a0ff">Winding Up &#10084;&#65039;</h3>')
     parts.append(TIMER_SCRIPT)
     return "\n".join(parts)
@@ -458,8 +532,8 @@ def process(video, processed_folder, output_folder):
         unc = next((l for l in site_labels if l.lower() == "uncategorized"), None)
         labels = [unc] if unc else [g for g in meta["genres"]][:2] + [meta["language"]]
     labels = [str(l)[:40] for l in labels if l][:8]
-    content = build_html(meta, thumb_id, shot_ids, outputs, fps)
-    body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) - Full Movie',
+    content = build_html(meta, thumb_id, shot_ids, outputs, fps, dur)
+    body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) {meta["language"]} Movie - Watch Online & Download',
             "content": content, "labels": labels}
     post = retry(lambda: blogger.posts().insert(
         blogId=BLOG_ID, body=body, isDraft=not PUBLISH).execute())
