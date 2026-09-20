@@ -428,7 +428,7 @@ TIMER_SCRIPT = f'''<script>
 # f-string. This prevents the SyntaxError caused by JS/CSS braces.
 # ============================================================
 def build_video_player(outputs, language):
-    """HDVB-style responsive player."""
+    """Responsive HTML5 player using the uploaded Google Drive MP4 files."""
     sources = [
         {"quality": int(q), "url": drive_video_url(fid)}
         for q, fid, _ in outputs
@@ -437,110 +437,205 @@ def build_video_player(outputs, language):
     player_language = str(language or "").strip() or "Original"
     safe_language = html.escape(player_language, quote=True)
 
-    player = r'''
+    return f'''\
 <div class="mv-player-wrap">
 <style>
-.mv-player-wrap{width:100%;max-width:1000px;margin:18px auto;font-family:Arial,Helvetica,sans-serif}
-.mv-player{position:relative;width:100%;aspect-ratio:16/9;background:#000;overflow:hidden;border-radius:2px;color:#fff;user-select:none}
-.mv-player video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
-.mv-lang-badge{position:absolute;top:18px;left:18px;z-index:20;min-width:124px;padding:10px 18px;border:0;border-radius:4px;background:#31ad4b;color:#061207;font-size:20px;line-height:1.15;text-align:center;cursor:pointer}
-.mv-lang-menu{position:absolute;top:58px;left:18px;z-index:40;min-width:160px;max-height:220px;overflow:auto;padding:5px;border-radius:5px;background:rgba(18,18,18,.97);border:1px solid rgba(255,255,255,.15);display:none}
-.mv-lang-menu.show{display:block}
-.mv-lang-menu button{display:block;width:100%;padding:9px 11px;border:0;border-radius:4px;background:transparent;color:#fff;text-align:left;font-size:14px;cursor:pointer}
-.mv-lang-menu button:hover,.mv-lang-menu button.active{background:#31ad4b;color:#071108}
-.mv-center-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:122px;height:122px;border:0;border-radius:50%;background:#31ad4b;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center}
-.mv-center-play .mv-play-icon{margin-left:8px;width:0;height:0;border-top:20px solid transparent;border-bottom:20px solid transparent;border-left:32px solid #050505}
-.mv-player-controls{position:absolute;left:0;right:0;bottom:0;z-index:25;padding:0 15px 13px;background:linear-gradient(to bottom,transparent 0%,rgba(0,0,0,.02) 18%,rgba(0,0,0,.90) 100%)}
-.mv-progress{position:relative;width:100%;height:7px;margin-bottom:12px;background:#555;border-radius:8px;cursor:pointer;touch-action:none}
-.mv-buffer{position:absolute;left:0;top:0;width:0;height:100%;background:#777;border-radius:8px;pointer-events:none}
-.mv-played{position:absolute;left:0;top:0;width:0;height:100%;background:#fff;border-radius:8px;pointer-events:none}
-.mv-progress-dot{position:absolute;left:0;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.45);pointer-events:none}
-.mv-controls-row{display:flex;align-items:center;gap:19px;min-height:40px}
-.mv-control{width:36px;height:36px;padding:0;border:0;background:transparent;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
-.mv-control:hover{opacity:.82}
-.mv-time{color:#fff;font-size:16px;white-space:nowrap;min-width:86px}
-.mv-spacer{flex:1}
-.mv-volume-range{display:none;width:76px}
-.mv-icon-play{width:0;height:0;border-top:12px solid transparent;border-bottom:12px solid transparent;border-left:19px solid #fff;margin-left:4px}
-.mv-icon-pause{width:18px;height:24px;position:relative}
-.mv-icon-pause:before,.mv-icon-pause:after{content:"";position:absolute;top:0;bottom:0;width:6px;background:#fff}
-.mv-icon-pause:before{left:1px}.mv-icon-pause:after{right:1px}
-.mv-icon-volume{position:relative;width:25px;height:24px}
-.mv-icon-volume:before{content:"";position:absolute;left:0;top:8px;width:7px;height:9px;background:#fff}
-.mv-icon-volume:after{content:"";position:absolute;left:6px;top:4px;width:0;height:0;border-top:8px solid transparent;border-bottom:8px solid transparent;border-right:13px solid #fff}
-.mv-icon-gear{width:25px;height:25px;border:5px dotted #fff;border-radius:50%;box-sizing:border-box;position:relative}
-.mv-icon-gear:after{content:"";position:absolute;left:5px;top:5px;width:5px;height:5px;border-radius:50%;background:#fff}
-.mv-icon-full{width:23px;height:23px;position:relative}
-.mv-icon-full:before,.mv-icon-full:after{content:"";position:absolute;width:9px;height:9px}
-.mv-icon-full:before{left:0;top:0;border-left:3px solid #fff;border-top:3px solid #fff}
-.mv-icon-full:after{right:0;bottom:0;border-right:3px solid #fff;border-bottom:3px solid #fff}
-.mv-settings{position:absolute;right:55px;bottom:55px;z-index:50;width:185px;padding:7px;border-radius:7px;background:rgba(17,17,17,.98);border:1px solid rgba(255,255,255,.14);box-shadow:0 10px 28px rgba(0,0,0,.55);display:none}
-.mv-settings.show{display:block}
-.mv-settings-title{padding:7px 9px;color:#aaa;font-size:12px;text-transform:uppercase}
-.mv-settings button{width:100%;border:0;border-radius:5px;padding:9px 10px;background:transparent;color:#fff;text-align:left;font-size:14px;cursor:pointer}
-.mv-settings button:hover,.mv-settings button.active{background:#31ad4b;color:#061207}
-.mv-settings-separator{height:1px;margin:5px 0;background:rgba(255,255,255,.12)}
-.mv-speed-label{display:flex;justify-content:space-between;align-items:center}
-@media(max-width:600px){
-.mv-player{border-radius:0}.mv-lang-badge{top:10px;left:10px;min-width:92px;padding:8px 13px;font-size:17px}.mv-lang-menu{top:51px;left:10px}.mv-center-play{width:96px;height:96px}.mv-center-play .mv-play-icon{border-top-width:16px;border-bottom-width:16px;border-left-width:26px}.mv-player-controls{padding:0 10px 8px}.mv-controls-row{gap:11px;min-height:34px}.mv-control{width:30px;height:30px}.mv-time{font-size:14px;min-width:78px}.mv-progress{height:6px;margin-bottom:9px}.mv-progress-dot{width:20px;height:20px}.mv-icon-play{border-top-width:10px;border-bottom-width:10px;border-left-width:16px}.mv-icon-pause{width:15px;height:20px}.mv-icon-pause:before,.mv-icon-pause:after{width:5px}.mv-icon-gear{width:22px;height:22px;border-width:4px}.mv-icon-full{width:21px;height:21px}.mv-settings{right:10px;bottom:49px;width:170px}
-}
+.mv-player-wrap{{width:100%;max-width:1000px;margin:24px auto;font-family:Arial,Helvetica,sans-serif}}
+.mv-player{{position:relative;width:100%;aspect-ratio:16/9;background:#000;overflow:hidden;border-radius:8px;box-shadow:0 10px 35px rgba(0,0,0,.45);color:#fff}}
+.mv-player video{{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}}
+.mv-center-play{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:72px;height:72px;border:0;border-radius:50%;background:rgba(0,0,0,.72);color:#fff;font-size:30px;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center}}
+.mv-center-play:hover{{background:rgba(0,0,0,.9)}}
+.mv-player-controls{{position:absolute;left:0;right:0;bottom:0;padding:35px 12px 10px;background:linear-gradient(transparent,rgba(0,0,0,.88));z-index:10}}
+.mv-progress{{position:relative;width:100%;height:5px;background:rgba(255,255,255,.25);border-radius:10px;cursor:pointer;margin-bottom:10px;touch-action:none}}
+.mv-buffer{{position:absolute;left:0;top:0;height:100%;width:0;background:rgba(255,255,255,.35);border-radius:10px;pointer-events:none}}
+.mv-played{{position:absolute;left:0;top:0;height:100%;width:0;background:#fff;border-radius:10px;pointer-events:none}}
+.mv-progress-dot{{position:absolute;top:50%;left:0;transform:translate(-50%,-50%);width:13px;height:13px;border-radius:50%;background:#fff;box-shadow:0 0 8px rgba(0,0,0,.5);pointer-events:none}}
+.mv-controls-row{{display:flex;align-items:center;gap:8px}}
+.mv-btn{{border:0;background:transparent;color:#fff;cursor:pointer;font-size:16px;padding:7px;border-radius:6px;line-height:1}}
+.mv-btn:hover{{background:rgba(255,255,255,.15)}}
+.mv-time{{font-size:13px;white-space:nowrap;min-width:82px}}
+.mv-spacer{{flex:1}}
+.mv-menu-wrap{{position:relative}}
+.mv-menu{{position:absolute;right:0;bottom:43px;min-width:145px;max-height:280px;overflow:auto;background:rgba(18,18,18,.97);border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:5px;display:none;z-index:50;box-shadow:0 8px 25px rgba(0,0,0,.5)}}
+.mv-menu.show{{display:block}}
+.mv-menu button{{width:100%;border:0;background:transparent;color:#fff;padding:9px 10px;text-align:left;border-radius:5px;cursor:pointer;font-size:14px}}
+.mv-menu button:hover{{background:rgba(255,255,255,.14)}}
+.mv-menu button.active{{background:#2d7cff}}
+.mv-volume{{width:78px}}
+@media(max-width:600px){{
+.mv-player{{border-radius:5px}}
+.mv-center-play{{width:58px;height:58px;font-size:24px}}
+.mv-player-controls{{padding:28px 7px 6px}}
+.mv-btn{{font-size:14px;padding:5px}}
+.mv-time{{font-size:11px;min-width:65px}}
+.mv-volume{{display:none}}
+.mv-menu{{bottom:38px;min-width:125px}}
+}}
 </style>
+
 <div class="mv-player" data-mv-player>
 <video data-mv-video playsinline webkit-playsinline preload="metadata" autoplay muted></video>
-<button type="button" class="mv-lang-badge" data-mv-lang>__LANGUAGE__</button>
-<div class="mv-lang-menu" data-mv-lang-menu><button type="button" class="active" disabled>__LANGUAGE__</button></div>
-<button type="button" class="mv-center-play" data-mv-center aria-label="Play"><span class="mv-play-icon"></span></button>
-<div class="mv-settings" data-mv-settings>
-<div class="mv-settings-title">Quality</div>
-<div data-mv-quality-menu></div>
-<div class="mv-settings-separator"></div>
-<div class="mv-settings-title">Speed</div>
-<button type="button" data-speed="0.5"><span class="mv-speed-label"><span>0.5x</span><span></span></span></button>
-<button type="button" data-speed="0.75"><span class="mv-speed-label"><span>0.75x</span><span></span></span></button>
-<button type="button" data-speed="1" class="active"><span class="mv-speed-label"><span>Normal</span><span>1x</span></span></button>
-<button type="button" data-speed="1.25"><span class="mv-speed-label"><span>1.25x</span><span></span></span></button>
-<button type="button" data-speed="1.5"><span class="mv-speed-label"><span>1.5x</span><span></span></span></button>
-<button type="button" data-speed="2"><span class="mv-speed-label"><span>2x</span><span></span></span></button>
-</div>
+<button type="button" class="mv-center-play" data-mv-center aria-label="Play">▶</button>
+
 <div class="mv-player-controls">
-<div class="mv-progress" data-mv-progress><div class="mv-buffer" data-mv-buffer></div><div class="mv-played" data-mv-played></div><div class="mv-progress-dot" data-mv-dot></div></div>
+<div class="mv-progress" data-mv-progress>
+<div class="mv-buffer" data-mv-buffer></div>
+<div class="mv-played" data-mv-played></div>
+<div class="mv-progress-dot" data-mv-dot></div>
+</div>
+
 <div class="mv-controls-row">
-<button type="button" class="mv-control" data-mv-play aria-label="Play/Pause"><span class="mv-icon-play"></span></button>
-<button type="button" class="mv-control" data-mv-mute aria-label="Mute"><span class="mv-icon-volume"></span></button>
-<input class="mv-volume-range" data-mv-volume type="range" min="0" max="1" step="0.05" value="1">
-<span class="mv-time" data-mv-time>0:00 - 0:00</span>
+<button type="button" class="mv-btn" data-mv-play aria-label="Play/Pause">▶</button>
+<button type="button" class="mv-btn" data-mv-mute aria-label="Mute">🔊</button>
+<input class="mv-volume" data-mv-volume type="range" min="0" max="1" step="0.05" value="1">
+<span class="mv-time" data-mv-time>0:00 / 0:00</span>
 <span class="mv-spacer"></span>
-<button type="button" class="mv-control" data-mv-settings-btn aria-label="Settings"><span class="mv-icon-gear"></span></button>
-<button type="button" class="mv-control" data-mv-fullscreen aria-label="Fullscreen"><span class="mv-icon-full"></span></button>
-</div></div></div></div>
+
+<div class="mv-menu-wrap">
+<button type="button" class="mv-btn" data-mv-quality-btn>⚙ Quality</button>
+<div class="mv-menu" data-mv-quality-menu></div>
+</div>
+
+<div class="mv-menu-wrap">
+<button type="button" class="mv-btn" data-mv-language-btn>🌐 {safe_language}</button>
+<div class="mv-menu" data-mv-language-menu>
+<button type="button" class="active" disabled>🔊 {safe_language}</button>
+</div>
+</div>
+
+<div class="mv-menu-wrap">
+<button type="button" class="mv-btn" data-mv-speed-btn>1x</button>
+<div class="mv-menu" data-mv-speed-menu>
+<button type="button" data-speed="0.5">0.5x</button>
+<button type="button" data-speed="0.75">0.75x</button>
+<button type="button" data-speed="1" class="active">1x</button>
+<button type="button" data-speed="1.25">1.25x</button>
+<button type="button" data-speed="1.5">1.5x</button>
+<button type="button" data-speed="2">2x</button>
+</div>
+</div>
+
+<button type="button" class="mv-btn" data-mv-fullscreen aria-label="Fullscreen">⛶</button>
+</div>
+</div>
+</div>
+
 <script>
-(function(){
+(function(){{
 var players=document.querySelectorAll('[data-mv-player]');
-var SOURCES=__SOURCES_JSON__;
-function initPlayer(root){
-var video=root.querySelector('[data-mv-video]'),playBtn=root.querySelector('[data-mv-play]'),centerBtn=root.querySelector('[data-mv-center]'),muteBtn=root.querySelector('[data-mv-mute]'),volume=root.querySelector('[data-mv-volume]'),progress=root.querySelector('[data-mv-progress]'),buffer=root.querySelector('[data-mv-buffer]'),played=root.querySelector('[data-mv-played]'),dot=root.querySelector('[data-mv-dot]'),time=root.querySelector('[data-mv-time]'),settingsBtn=root.querySelector('[data-mv-settings-btn]'),settings=root.querySelector('[data-mv-settings]'),qualityMenu=root.querySelector('[data-mv-quality-menu]'),langBtn=root.querySelector('[data-mv-lang]'),langMenu=root.querySelector('[data-mv-lang-menu]'),fullscreenBtn=root.querySelector('[data-mv-fullscreen]');
+var SOURCES={sources_json};
+function initPlayer(root){{
+var video=root.querySelector('[data-mv-video]');
+var playBtn=root.querySelector('[data-mv-play]');
+var centerBtn=root.querySelector('[data-mv-center]');
+var muteBtn=root.querySelector('[data-mv-mute]');
+var volume=root.querySelector('[data-mv-volume]');
+var progress=root.querySelector('[data-mv-progress]');
+var buffer=root.querySelector('[data-mv-buffer]');
+var played=root.querySelector('[data-mv-played]');
+var dot=root.querySelector('[data-mv-dot]');
+var time=root.querySelector('[data-mv-time]');
+var qualityBtn=root.querySelector('[data-mv-quality-btn]');
+var qualityMenu=root.querySelector('[data-mv-quality-menu]');
+var languageBtn=root.querySelector('[data-mv-language-btn]');
+var languageMenu=root.querySelector('[data-mv-language-menu]');
+var speedBtn=root.querySelector('[data-mv-speed-btn]');
+var speedMenu=root.querySelector('[data-mv-speed-menu]');
+var fullscreenBtn=root.querySelector('[data-mv-fullscreen]');
 var currentQuality='auto';
-function formatTime(sec){if(!isFinite(sec))return '0:00';sec=Math.floor(sec);var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;if(h>0)return h+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');return m+':'+String(s).padStart(2,'0');}
-function updateTime(){var c=video.currentTime||0,d=video.duration||0;time.textContent=formatTime(c)+' - '+formatTime(d);if(d>0){var p=Math.max(0,Math.min(100,c/d*100));played.style.width=p+'%';dot.style.left=p+'%';}}
-function updateBuffer(){try{if(video.buffered.length&&video.duration){var e=video.buffered.end(video.buffered.length-1);buffer.style.width=Math.min(100,e/video.duration*100)+'%';}}catch(e){}}
-function updatePlayButton(){var icon=playBtn.querySelector('span');if(video.paused){icon.className='mv-icon-play';centerBtn.style.display='flex';centerBtn.innerHTML='<span class="mv-play-icon"></span>';}else{icon.className='mv-icon-pause';setTimeout(function(){if(!video.paused)centerBtn.style.display='none';},350);}}
-function togglePlay(){if(video.paused)video.play().catch(function(){});else video.pause();}
-function updateMuteIcon(){var icon=muteBtn.querySelector('span');icon.style.opacity=(video.muted||video.volume===0)?'.55':'1';}
-function findSource(q){for(var i=0;i<SOURCES.length;i++)if(SOURCES[i].quality===q)return SOURCES[i];return null;}
-function selectAutoQuality(){if(!SOURCES.length)return null;var w=window.innerWidth||720;var wanted=w<=480?480:(w<=720?720:Math.max.apply(null,SOURCES.map(function(s){return s.quality;})));return findSource(wanted)||SOURCES[SOURCES.length-1];}
-function loadSource(source,keepTime){if(!source)return;var oldTime=video.currentTime||0,wasPlaying=!video.paused,oldRate=video.playbackRate||1;video.src=source.url;video.load();video.playbackRate=oldRate;video.addEventListener('loadedmetadata',function onMeta(){video.removeEventListener('loadedmetadata',onMeta);if(keepTime&&isFinite(oldTime)&&oldTime>0&&video.duration)video.currentTime=Math.min(oldTime,Math.max(0,video.duration-.5));if(wasPlaying||keepTime)video.play().catch(function(){});updateTime();});}
-function closePopups(){settings.classList.remove('show');langMenu.classList.remove('show');}
-function buildQualityMenu(){qualityMenu.innerHTML='';var auto=document.createElement('button');auto.type='button';auto.textContent='Auto';if(currentQuality==='auto')auto.className='active';auto.addEventListener('click',function(){currentQuality='auto';closePopups();loadSource(selectAutoQuality(),true);buildQualityMenu();});qualityMenu.appendChild(auto);SOURCES.slice().sort(function(a,b){return b.quality-a.quality;}).forEach(function(source){var btn=document.createElement('button');btn.type='button';btn.textContent=source.quality+'p';if(currentQuality===source.quality)btn.className='active';btn.addEventListener('click',function(){currentQuality=source.quality;closePopups();loadSource(source,true);buildQualityMenu();});qualityMenu.appendChild(btn);});}
-playBtn.addEventListener('click',togglePlay);centerBtn.addEventListener('click',togglePlay);video.addEventListener('play',updatePlayButton);video.addEventListener('pause',updatePlayButton);video.addEventListener('timeupdate',updateTime);video.addEventListener('progress',updateBuffer);video.addEventListener('loadedmetadata',updateTime);video.addEventListener('durationchange',updateTime);muteBtn.addEventListener('click',function(){video.muted=!video.muted;updateMuteIcon();});volume.addEventListener('input',function(){video.volume=parseFloat(volume.value);if(video.volume>0)video.muted=false;updateMuteIcon();});
-function seek(x){if(!video.duration)return;var r=progress.getBoundingClientRect(),p=Math.max(0,Math.min(1,(x-r.left)/r.width));video.currentTime=p*video.duration;}
-progress.addEventListener('click',function(e){seek(e.clientX);});progress.addEventListener('pointerdown',function(e){seek(e.clientX);});settingsBtn.addEventListener('click',function(e){e.stopPropagation();var open=settings.classList.contains('show');closePopups();if(!open)settings.classList.add('show');});langBtn.addEventListener('click',function(e){e.stopPropagation();var open=langMenu.classList.contains('show');closePopups();if(!open)langMenu.classList.add('show');});root.querySelectorAll('button[data-speed]').forEach(function(btn){btn.addEventListener('click',function(){var speed=parseFloat(btn.getAttribute('data-speed'));video.playbackRate=speed;root.querySelectorAll('button[data-speed]').forEach(function(x){x.classList.remove('active');});btn.classList.add('active');closePopups();});});fullscreenBtn.addEventListener('click',function(){if(document.fullscreenElement){document.exitFullscreen();return;}if(root.requestFullscreen){root.requestFullscreen();return;}if(root.webkitRequestFullscreen)root.webkitRequestFullscreen();});document.addEventListener('click',function(){closePopups();});root.addEventListener('click',function(e){e.stopPropagation();});buildQualityMenu();var initial=selectAutoQuality();if(initial){currentQuality='auto';loadSource(initial,false);}video.muted=true;video.volume=1;video.play().catch(function(){centerBtn.style.display='flex';});updateMuteIcon();updatePlayButton();updateTime();}
+
+function formatTime(sec){{
+if(!isFinite(sec))return '0:00';
+sec=Math.floor(sec);
+var h=Math.floor(sec/3600);
+var m=Math.floor((sec%3600)/60);
+var s=sec%60;
+if(h>0)return h+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+return m+':'+String(s).padStart(2,'0');
+}}
+function updateTime(){{
+var current=video.currentTime||0;
+var duration=video.duration||0;
+time.textContent=formatTime(current)+' / '+formatTime(duration);
+if(duration>0){{var p=Math.max(0,Math.min(100,current/duration*100));played.style.width=p+'%';dot.style.left=p+'%';}}
+}}
+function updateBuffer(){{
+try{{if(video.buffered.length&&video.duration){{var end=video.buffered.end(video.buffered.length-1);buffer.style.width=Math.min(100,end/video.duration*100)+'%';}}}}catch(e){{}}
+}}
+function updatePlayButton(){{
+if(video.paused){{playBtn.textContent='▶';centerBtn.textContent='▶';centerBtn.style.display='flex';}}
+else{{playBtn.textContent='❚❚';centerBtn.textContent='❚❚';setTimeout(function(){{if(!video.paused)centerBtn.style.display='none';}},500);}}
+}}
+function togglePlay(){{if(video.paused)video.play().catch(function(){{}});else video.pause();}}
+function setMute(){{video.muted=!video.muted;muteBtn.textContent=video.muted?'🔇':'🔊';}}
+function findSource(q){{for(var i=0;i<SOURCES.length;i++)if(SOURCES[i].quality===q)return SOURCES[i];return null;}}
+function selectAutoQuality(){{
+if(!SOURCES.length)return null;
+var width=window.innerWidth||720;
+var wanted=width<=480?480:(width<=720?720:Math.max.apply(null,SOURCES.map(function(s){{return s.quality;}})));
+return findSource(wanted)||SOURCES[SOURCES.length-1];
+}}
+function loadSource(source,keepTime){{
+if(!source)return;
+var oldTime=video.currentTime||0;
+var wasPlaying=!video.paused;
+var oldRate=video.playbackRate||1;
+video.src=source.url;
+video.load();
+video.playbackRate=oldRate;
+video.addEventListener('loadedmetadata',function onMeta(){{
+video.removeEventListener('loadedmetadata',onMeta);
+if(keepTime&&isFinite(oldTime)&&oldTime>0&&video.duration)video.currentTime=Math.min(oldTime,Math.max(0,video.duration-0.5));
+if(wasPlaying||keepTime)video.play().catch(function(){{}});
+updateTime();
+}});
+}}
+function closeMenus(){{root.querySelectorAll('.mv-menu').forEach(function(menu){{menu.classList.remove('show');}});}}
+function toggleMenu(menu){{var open=menu.classList.contains('show');closeMenus();if(!open)menu.classList.add('show');}}
+function buildQualityMenu(){{
+qualityMenu.innerHTML='';
+var auto=document.createElement('button');
+auto.type='button';auto.textContent='Auto';
+if(currentQuality==='auto')auto.className='active';
+auto.addEventListener('click',function(){{currentQuality='auto';qualityBtn.textContent='⚙ Auto';closeMenus();loadSource(selectAutoQuality(),true);buildQualityMenu();}});
+qualityMenu.appendChild(auto);
+SOURCES.slice().sort(function(a,b){{return b.quality-a.quality;}}).forEach(function(source){{
+var b=document.createElement('button');b.type='button';b.textContent=source.quality+'p';
+if(currentQuality===source.quality)b.className='active';
+b.addEventListener('click',function(){{currentQuality=source.quality;qualityBtn.textContent='⚙ '+source.quality+'p';closeMenus();loadSource(source,true);buildQualityMenu();}});
+qualityMenu.appendChild(b);
+}});
+}}
+playBtn.addEventListener('click',togglePlay);
+centerBtn.addEventListener('click',togglePlay);
+video.addEventListener('play',updatePlayButton);
+video.addEventListener('pause',updatePlayButton);
+video.addEventListener('timeupdate',updateTime);
+video.addEventListener('progress',updateBuffer);
+video.addEventListener('loadedmetadata',updateTime);
+video.addEventListener('durationchange',updateTime);
+muteBtn.addEventListener('click',setMute);
+volume.addEventListener('input',function(){{video.volume=parseFloat(volume.value);if(video.volume>0&&video.muted)video.muted=false;muteBtn.textContent=video.muted?'🔇':'🔊';}});
+progress.addEventListener('click',function(e){{if(!video.duration)return;var rect=progress.getBoundingClientRect();var p=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));video.currentTime=p*video.duration;}});
+qualityBtn.addEventListener('click',function(e){{e.stopPropagation();toggleMenu(qualityMenu);}});
+languageBtn.addEventListener('click',function(e){{e.stopPropagation();toggleMenu(languageMenu);}});
+speedBtn.addEventListener('click',function(e){{e.stopPropagation();toggleMenu(speedMenu);}});
+speedMenu.querySelectorAll('button[data-speed]').forEach(function(btn){{btn.addEventListener('click',function(){{var speed=parseFloat(btn.getAttribute('data-speed'));video.playbackRate=speed;speedBtn.textContent=speed+'x';speedMenu.querySelectorAll('button').forEach(function(x){{x.classList.remove('active');}});btn.classList.add('active');closeMenus();}});}});
+fullscreenBtn.addEventListener('click',function(){{if(document.fullscreenElement){{document.exitFullscreen();}}else if(root.requestFullscreen){{root.requestFullscreen();}}else if(root.webkitRequestFullscreen){{root.webkitRequestFullscreen();}}}});
+document.addEventListener('click',closeMenus);
+root.addEventListener('click',function(e){{e.stopPropagation();}});
+buildQualityMenu();
+var initial=selectAutoQuality();
+if(initial){{currentQuality='auto';loadSource(initial,false);}}
+video.muted=true;video.volume=1;
+video.addEventListener('error',function(){{console.warn('Video source failed:',video.currentSrc,video.error);}});
+video.play().catch(function(){{centerBtn.style.display='flex';}});
+updatePlayButton();
+}}
 for(var i=0;i<players.length;i++)initPlayer(players[i]);
-})();
+}})();
 </script>
-'''
-    player = player.replace("__SOURCES_JSON__", sources_json)
-    player = player.replace("__LANGUAGE__", safe_language)
-    return player
+</div>'''
 
 # ============================================================
 # BLOGGER HTML
