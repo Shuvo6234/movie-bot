@@ -2,19 +2,7 @@
 Movie Bot: Drive video -> multi-resolution -> screenshots + 9:16 thumbnail
 -> Gemini title/description/labels -> Blogger post (draft by default).
 Runs on GitHub Actions. All settings come from environment variables.
-
-PLAYER:
-- Custom responsive 16:9 HTML5 video player
-- Quality selector
-- Language selector
-- Playback speed
-- Fullscreen
-- Progress / buffer / volume / mute
-- Google Drive uploaded MP4 sources
-- 23.976 FPS is DISPLAYED as 24 FPS
-- Original source FPS is NOT forcibly changed during transcoding
 """
-
 import html
 import json
 import os
@@ -37,10 +25,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 
-# ============================================================
-# SETTINGS
-# ============================================================
-
+# ---------- settings ----------
 CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
@@ -48,72 +33,28 @@ GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 BLOG_ID = os.environ["BLOG_ID"]
 INPUT_FOLDER = os.environ["DRIVE_INPUT_FOLDER_ID"]
 
-GEMINI_MODEL = os.environ.get(
-    "GEMINI_MODEL",
-    "gemini-3.6-flash"
-)
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 RESOLUTIONS = [
     int(x)
-    for x in os.environ.get(
-        "RESOLUTIONS",
-        "480,720,1080"
-    ).split(",")
+    for x in os.environ.get("RESOLUTIONS", "480,720,1080").split(",")
     if x.strip()
 ]
 
-MAX_VIDEOS = int(
-    os.environ.get(
-        "MAX_VIDEOS",
-        "1"
-    )
-)
-
-PUBLISH = (
-    os.environ.get(
-        "PUBLISH",
-        "false"
-    ).lower()
-    == "true"
-)
-
-LANGUAGE_HINT = os.environ.get(
-    "LANGUAGE_HINT",
-    ""
-).strip()
-
-AUDIO_MINUTES = int(
-    os.environ.get(
-        "AUDIO_MINUTES",
-        "10"
-    )
-)
-
-SCREENSHOTS = int(
-    os.environ.get(
-        "SCREENSHOTS",
-        "6"
-    )
-)
-
-WAIT_SECONDS = int(
-    os.environ.get(
-        "WAIT_SECONDS",
-        "20"
-    )
-)
-
-DIRECTOR_NAME = os.environ.get(
-    "DIRECTOR_NAME",
-    ""
-).strip()
+MAX_VIDEOS = int(os.environ.get("MAX_VIDEOS", "1"))
+PUBLISH = os.environ.get("PUBLISH", "false").lower() == "true"
+LANGUAGE_HINT = os.environ.get("LANGUAGE_HINT", "").strip()
+AUDIO_MINUTES = int(os.environ.get("AUDIO_MINUTES", "10"))
+SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
+WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
+DIRECTOR_NAME = os.environ.get("DIRECTOR_NAME", "").strip()
 
 CRF = {
     480: 24,
     720: 23,
     1080: 22,
     1440: 22,
-    2160: 21
+    2160: 21,
 }
 
 WORK = Path("work")
@@ -124,55 +65,27 @@ SCOPES = [
 ]
 
 
-# ============================================================
-# LOG
-# ============================================================
-
+# ---------- general helpers ----------
 def log(*a):
     print(*a, flush=True)
 
 
-# ============================================================
-# RETRY
-# ============================================================
-
 def retry(fn, tries=4):
-
     for i in range(tries):
-
         try:
             return fn()
-
-        except Exception as e:
-
+        except Exception as e:  # noqa
             if i == tries - 1:
                 raise
+            log(f"  retry {i + 1} after error: {e}")
+            time.sleep(5 * (i + 1))
 
-            log(
-                f"  retry {i + 1} after error: {e}"
-            )
-
-            time.sleep(
-                5 * (i + 1)
-            )
-
-
-# ============================================================
-# RUN COMMAND
-# ============================================================
 
 def run(cmd):
-
-    subprocess.run(
-        cmd,
-        check=True
-    )
+    subprocess.run(cmd, check=True)
 
 
-# ============================================================
-# GOOGLE CLIENTS
-# ============================================================
-
+# ---------- Google clients ----------
 creds = Credentials(
     None,
     refresh_token=REFRESH_TOKEN,
@@ -188,32 +101,26 @@ drive = build(
     "drive",
     "v3",
     credentials=creds,
-    cache_discovery=False
+    cache_discovery=False,
 )
 
 blogger = build(
     "blogger",
     "v3",
     credentials=creds,
-    cache_discovery=False
+    cache_discovery=False,
 )
 
-gclient = genai.Client(
-    api_key=GEMINI_KEY
-)
+gclient = genai.Client(api_key=GEMINI_KEY)
 
 
-# ============================================================
-# DRIVE HELPERS
-# ============================================================
-
+# ---------- Drive helpers ----------
 def ensure_folder(name):
-
     q = (
-        f"'{INPUT_FOLDER}' in parents "
-        f"and name='{name}' "
-        "and mimeType='application/vnd.google-apps.folder' "
-        "and trashed=false"
+        f"'{INPUT_FOLDER}' in parents and "
+        f"name='{name}' and "
+        "mimeType='application/vnd.google-apps.folder' and "
+        "trashed=false"
     )
 
     res = drive.files().list(
@@ -226,9 +133,8 @@ def ensure_folder(name):
 
     body = {
         "name": name,
-        "mimeType":
-            "application/vnd.google-apps.folder",
-        "parents": [INPUT_FOLDER]
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [INPUT_FOLDER],
     }
 
     return drive.files().create(
@@ -238,11 +144,10 @@ def ensure_folder(name):
 
 
 def list_videos():
-
     q = (
-        f"'{INPUT_FOLDER}' in parents "
-        "and mimeType contains 'video/' "
-        "and trashed=false"
+        f"'{INPUT_FOLDER}' in parents and "
+        "mimeType contains 'video/' and "
+        "trashed=false"
     )
 
     res = drive.files().list(
@@ -255,13 +160,9 @@ def list_videos():
 
 
 def download(file_id, dest):
-
-    req = drive.files().get_media(
-        fileId=file_id
-    )
+    req = drive.files().get_media(fileId=file_id)
 
     with open(dest, "wb") as fh:
-
         dl = MediaIoBaseDownload(
             fh,
             req,
@@ -271,21 +172,16 @@ def download(file_id, dest):
         done = False
 
         while not done:
-
-            status, done = retry(
-                dl.next_chunk
-            )
+            status, done = retry(dl.next_chunk)
 
             if status:
-
                 log(
-                    "  download "
+                    f"  download "
                     f"{int(status.progress() * 100)}%"
                 )
 
 
 def upload_public(path, parent, mime):
-
     media = MediaFileUpload(
         path,
         mimetype=mime,
@@ -305,16 +201,12 @@ def upload_public(path, parent, mime):
     resp = None
 
     while resp is None:
-
-        _, resp = retry(
-            req.next_chunk
-        )
+        _, resp = retry(req.next_chunk)
 
     fid = resp["id"]
 
     retry(
-        lambda:
-        drive.permissions().create(
+        lambda: drive.permissions().create(
             fileId=fid,
             body={
                 "type": "anyone",
@@ -326,53 +218,32 @@ def upload_public(path, parent, mime):
     return fid
 
 
-# ============================================================
-# FFMPEG / FPS
-# ============================================================
-
+# ---------- ffmpeg helpers ----------
 def parse_fps(*vals):
-
     for v in vals:
-
         try:
-
             a, b = str(v).split("/")
-
             a = float(a)
             b = float(b)
 
             if b and a / b > 0:
                 return a / b
 
-        except Exception:
+        except Exception:  # noqa
             pass
 
     return 30.0
 
 
+# IMPORTANT:
+# 23.976 -> 24
+# 29.97  -> 30
+# 59.94  -> 60
 def fmt_fps(x):
-    """
-    Display FPS as a whole number.
-
-    Examples:
-    23.976 -> 24
-    24    -> 24
-    29.97 -> 30
-    30    -> 30
-
-    IMPORTANT:
-    This only changes the displayed label.
-    It does NOT change the actual video FPS.
-    """
-
-    try:
-        return str(round(float(x)))
-    except Exception:
-        return "24"
+    return str(round(x))
 
 
 def probe(path):
-
     out = subprocess.check_output([
         "ffprobe",
         "-v",
@@ -403,29 +274,14 @@ def probe(path):
     )
 
 
-# ============================================================
-# SCREENSHOTS
-# ============================================================
-
-def make_screenshots(
-    src,
-    dur,
-    outdir
-):
-
+def make_screenshots(src, dur, outdir):
     files = []
 
     for i in range(SCREENSHOTS):
-
-        t = (
-            dur *
-            (i + 1) /
-            (SCREENSHOTS + 1)
-        )
+        t = dur * (i + 1) / (SCREENSHOTS + 1)
 
         p = str(
-            outdir /
-            f"shot_{i + 1}.jpg"
+            outdir / f"shot_{i + 1}.jpg"
         )
 
         run([
@@ -451,47 +307,21 @@ def make_screenshots(
     return files
 
 
-# ============================================================
-# THUMBNAIL
-# ============================================================
-
-def make_thumbnail(
-    src,
-    dur,
-    w,
-    h,
-    outdir
-):
-
+def make_thumbnail(src, dur, w, h, outdir):
     """
-    9:16 portrait thumbnail,
-    720x1280,
+    9:16 portrait thumbnail, 720x1280,
     centre crop from a frame at 35%.
     """
 
     if w * 16 >= h * 9:
-
         ch = h // 2 * 2
-
-        cw = (
-            int(h * 9 / 16)
-            // 2
-            * 2
-        )
-
+        cw = int(h * 9 / 16) // 2 * 2
     else:
-
         cw = w // 2 * 2
-
-        ch = (
-            int(w * 16 / 9)
-            // 2
-            * 2
-        )
+        ch = int(w * 16 / 9) // 2 * 2
 
     p = str(
-        outdir /
-        "thumb_9x16.jpg"
+        outdir / "thumb_9x16.jpg"
     )
 
     run([
@@ -515,32 +345,15 @@ def make_thumbnail(
     return p
 
 
-# ============================================================
-# GEMINI ANALYSIS INPUTS
-# ============================================================
-
-def analysis_inputs(
-    src,
-    dur,
-    outdir
-):
-
+def analysis_inputs(src, dur, outdir):
     frames = []
 
     n = 12
 
     for i in range(n):
+        t = dur * (i + 1) / (n + 1)
 
-        t = (
-            dur *
-            (i + 1) /
-            (n + 1)
-        )
-
-        p = (
-            outdir /
-            f"an_{i}.jpg"
-        )
+        p = outdir / f"an_{i}.jpg"
 
         run([
             "ffmpeg",
@@ -560,14 +373,9 @@ def analysis_inputs(
             str(p)
         ])
 
-        frames.append(
-            p.read_bytes()
-        )
+        frames.append(p.read_bytes())
 
-    audio = (
-        outdir /
-        "an_audio.mp3"
-    )
+    audio = outdir / "an_audio.mp3"
 
     start = dur * 0.10
 
@@ -592,59 +400,26 @@ def analysis_inputs(
         str(audio)
     ])
 
-    return (
-        frames,
-        audio.read_bytes()
-    )
+    return frames, audio.read_bytes()
 
 
-# ============================================================
-# TRANSCODE
-# ============================================================
-
-def transcode(
-    src,
-    target,
-    w,
-    h,
-    out
-):
-
+def transcode(src, target, w, h, out):
     """
-    target = length of the SHORT side
-    (480/720/1080).
+    target = length of the SHORT side (480/720/1080):
+    works for landscape and vertical.
 
-    IMPORTANT:
-    No '-r' is used here.
-
-    Therefore the original FPS is preserved
-    as much as possible.
-
-    Example:
-    23.976 source -> output remains 23.976
-    24 source     -> output remains 24
-    25 source     -> output remains 25
-
-    The Blogger information label rounds
-    23.976 -> 24fps.
+    NOTE:
+    No -r option is used here.
+    Therefore the source FPS is not forcefully changed.
     """
 
-    crf = CRF.get(
-        target,
-        23
+    crf = CRF.get(target, 23)
+
+    vf = (
+        f"scale=-2:{target}"
+        if w >= h
+        else f"scale={target}:-2"
     )
-
-    if w >= h:
-
-        vf = (
-            f"scale=-2:{target}"
-        )
-
-    else:
-
-        vf = (
-            f"scale={target}:-2"
-        )
 
     run([
         "ffmpeg",
@@ -654,45 +429,31 @@ def transcode(
         "-stats",
         "-i",
         src,
-
         "-map",
         "0:v:0",
-
         "-map",
         "0:a?",
-
         "-vf",
         vf,
-
         "-pix_fmt",
         "yuv420p",
-
         "-c:v",
         "libx264",
-
         "-preset",
         "veryfast",
-
         "-crf",
         str(crf),
-
         "-c:a",
         "aac",
-
         "-b:a",
         "128k",
-
         "-movflags",
         "+faststart",
-
         out
     ])
 
 
-# ============================================================
-# BLOG LABELS
-# ============================================================
-
+# ---------- menu labels ----------
 FALLBACK_LABELS = [
     "Bollywood Content",
     "Desi Junction",
@@ -724,7 +485,6 @@ BLOCKED_LABEL = re.compile(
 
 
 def parse_labels(page):
-
     found = re.findall(
         r"/search/label/([^\"'?&#<>\s/]+)",
         page
@@ -734,79 +494,56 @@ def parse_labels(page):
     seen = set()
 
     for f in found:
+        name = urllib.parse.unquote_plus(f).strip()
 
-        name = (
-            urllib.parse
-            .unquote_plus(f)
-            .strip()
-        )
-
-        if (
-            name
-            and
-            name.lower() not in seen
-        ):
-
-            seen.add(
-                name.lower()
-            )
-
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
             labels.append(name)
 
     return labels
 
 
 def get_site_labels():
+    """
+    Read the real label names from the blog's menu,
+    fall back to a built-in list.
+    """
 
     labels = []
 
     try:
-
-        url = (
-            blogger.blogs()
-            .get(blogId=BLOG_ID)
-            .execute()["url"]
-        )
+        url = blogger.blogs().get(
+            blogId=BLOG_ID
+        ).execute()["url"]
 
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent":
-                "Mozilla/5.0"
+                "User-Agent": "Mozilla/5.0"
             }
         )
 
-        page = (
-            urllib.request
-            .urlopen(
-                req,
-                timeout=30
-            )
-            .read()
-            .decode(
-                "utf-8",
-                "ignore"
-            )
+        page = urllib.request.urlopen(
+            req,
+            timeout=30
+        ).read().decode(
+            "utf-8",
+            "ignore"
         )
 
-        labels = parse_labels(
-            page
-        )
+        labels = parse_labels(page)
 
         log(
-            f"  Found {len(labels)} "
-            "labels on the blog"
+            f"  Found {len(labels)} labels on the blog"
         )
 
-    except Exception as e:
-
+    except Exception as e:  # noqa
         log(
             "  Could not read blog labels:",
             e
         )
 
     if len(labels) < 3:
-
         have = {
             l.lower()
             for l in labels
@@ -827,11 +564,7 @@ def get_site_labels():
     return labels[:60]
 
 
-def pick_labels(
-    raw,
-    site_labels
-):
-
+def pick_labels(raw, site_labels):
     canon = {
         l.lower(): l
         for l in site_labels
@@ -840,11 +573,8 @@ def pick_labels(
     out = []
 
     for r in raw or []:
-
         c = canon.get(
-            str(r)
-            .strip()
-            .lower()
+            str(r).strip().lower()
         )
 
         if c and c not in out:
@@ -853,14 +583,9 @@ def pick_labels(
     return out[:4]
 
 
-# ============================================================
-# GEMINI
-# ============================================================
-
+# ---------- Gemini ----------
 def as_paragraphs(v):
-
     if isinstance(v, list):
-
         return [
             str(x).strip()
             for x in v
@@ -883,19 +608,18 @@ YEAR_RE = re.compile(
 
 
 def find_year(filename):
+    """
+    Release year only if the file name contains one.
+    """
 
     m = YEAR_RE.search(
         Path(filename).stem
     )
 
-    if m:
-        return int(m.group(1))
-
-    return None
+    return int(m.group(1)) if m else None
 
 
 def clean_hint(filename):
-
     t = Path(filename).stem
 
     t = re.sub(
@@ -926,16 +650,10 @@ def clean_hint(filename):
     no_year = re.sub(
         r"\s+",
         " ",
-        YEAR_RE.sub(
-            " ",
-            t
-        )
+        YEAR_RE.sub(" ", t)
     ).strip()
 
-    return (
-        no_year
-        or t
-    )
+    return no_year or t
 
 
 def analyze(
@@ -944,75 +662,42 @@ def analyze(
     audio_bytes,
     site_labels
 ):
+    hint = clean_hint(filename_hint)
 
-    hint = clean_hint(
-        filename_hint
-    )
+    year = find_year(filename_hint)
 
-    year = find_year(
-        filename_hint
-    )
-
-    prompt = f"""
-You are a film writer. You are publishing an ORIGINAL film, on its own director's film
+    prompt = f"""You are a film writer. You are publishing an ORIGINAL film, on its own director's film
 blog. You get 12 frames spread across the film and an audio sample.
-
-File name hint (may be messy):
-"{hint}"
-
-Language hint:
-"{LANGUAGE_HINT}"
-
-Director name:
-"{DIRECTOR_NAME}"
+File name hint (may be messy): "{hint}". Language hint (may be empty): "{LANGUAGE_HINT}".
+Director name (may be empty): "{DIRECTOR_NAME}".
 
 Rules:
-
-- Write everything in your own words, in natural English.
-- Never copy text from any website, film or review.
-- Base it ONLY on what you can actually see and hear in the frames and audio.
-- If you are unsure, stay general and talk about mood, visuals, sound and themes instead of specific plot facts.
+- Write everything in your own words, in natural English. Never copy text from any website, film or review.
+- Base it ONLY on what you can actually see and hear in the frames and audio. If you are unsure,
+  stay general and talk about mood, visuals, sound and themes instead of specific plot facts.
 - Never invent cast, crew, awards, festivals, ratings, box office or plot facts you cannot see.
-- No piracy words.
-- The title must be a real film title of 1-6 words.
-- No hashtags, emojis, year or words like "trending reels".
-- If the file name hint is messy, invent a fitting title from what the film is about.
+- No piracy words (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
+- The title must be a real film title of 1-6 words. No hashtags, emojis, year or words like "trending reels".
+  If the file name hint is messy, invent a fitting title from what the film is about.
 
 Return ONLY JSON with these keys:
-
-title: the film title,
-
-tagline: one sentence, max 20 words,
-
-synopsis: 2 short paragraphs (about 120 words), spoiler-light, separated by a blank line,
-
-review: 3-4 paragraphs (about 300 words) analysing tone, visual style and camera work,
-sound and music, performances in general terms, themes and who will enjoy the film,
-separated by blank lines,
-
-themes: list of 3-5 short phrases,
-
-faq: list of 4 objects {{"q": "...", "a": "..."}}
-with 1-2 sentence answers about the film,
-
-genres: list of 1-3 genres,
-
-language: main spoken language,
-
-content_rating: one of
-"General audience", "Teen and above", "Mature audience",
-
-tags: list of up to 6 short keywords,
-
-labels: pick 1-4 categories that best fit this film,
-ONLY from this exact list
-(copy the spelling exactly):
-
-{json.dumps(site_labels)}
-
-Judge by language spoken, film industry/country,
-and type (movie, web series, trailer, song, etc.).
-Ignore labels about video encoding or file format.
+  title: the film title,
+  tagline: one sentence, max 20 words,
+  synopsis: 2 short paragraphs (about 120 words), spoiler-light, separated by a blank line,
+  review: 3-4 paragraphs (about 300 words) analysing tone, visual style and camera work, sound and
+          music, performances in general terms, themes and who will enjoy the film,
+          separated by blank lines,
+  themes: list of 3-5 short phrases,
+  faq: list of 4 objects {{"q": "...", "a": "..."}} with 1-2 sentence answers about the film
+       (genre, language, mood, who it suits, runtime feel),
+  genres: list of 1-3 genres,
+  language: main spoken language,
+  content_rating: one of "General audience", "Teen and above", "Mature audience",
+  tags: list of up to 6 short keywords,
+  labels: pick 1-4 categories that best fit this film, ONLY from this exact list
+          (copy the spelling exactly): {json.dumps(site_labels)}.
+          Judge by language spoken, film industry/country, and type (movie, web series,
+          trailer, song, etc.). Ignore labels about video encoding or file format.
 """
 
     parts = [
@@ -1036,12 +721,9 @@ Ignore labels about video encoding or file format.
         GEMINI_MODEL,
         "gemini-flash-latest"
     ]):
-
         try:
-
             resp = retry(
-                lambda:
-                gclient.models.generate_content(
+                lambda: gclient.models.generate_content(
                     model=model,
                     contents=[
                         prompt,
@@ -1069,113 +751,84 @@ Ignore labels about video encoding or file format.
 
             break
 
-        except Exception as e:
-
+        except Exception as e:  # noqa
             log(
                 f"  Gemini model {model} failed: {e}"
             )
 
     if not data:
-
-        log(
-            "  Using fallback text."
-        )
+        log("  Using fallback text.")
 
     faq = [
         f
-        for f in (
-            data.get("faq") or []
-        )
-        if (
-            isinstance(f, dict)
-            and f.get("q")
-            and f.get("a")
-        )
+        for f in (data.get("faq") or [])
+        if isinstance(f, dict)
+        and f.get("q")
+        and f.get("a")
     ]
 
     return {
+        "title": data.get("title")
+        or hint
+        or "Untitled Film",
 
-        "title":
-            data.get("title")
-            or hint
-            or "Untitled Film",
+        "tagline": data.get("tagline")
+        or "",
 
-        "tagline":
-            data.get("tagline")
-            or "",
+        "synopsis": as_paragraphs(
+            data.get("synopsis")
+        ) or [
+            "An original film."
+        ],
 
-        "synopsis":
-            as_paragraphs(
-                data.get("synopsis")
+        "review": as_paragraphs(
+            data.get("review")
+        ),
+
+        "themes": [
+            str(t)
+            for t in (
+                data.get("themes")
+                or []
             )
-            or ["An original film."],
+        ][:5],
 
-        "review":
-            as_paragraphs(
-                data.get("review")
-            ),
+        "faq": faq[:4],
 
-        "themes":
-            [
-                str(t)
-                for t in (
-                    data.get("themes")
-                    or []
-                )
-            ][:5],
+        "genres": data.get("genres")
+        or ["Drama"],
 
-        "faq":
-            faq[:4],
+        "language": data.get("language")
+        or LANGUAGE_HINT
+        or "Unknown",
 
-        "genres":
-            data.get("genres")
-            or ["Drama"],
+        "release_year": year,
 
-        "language":
-            data.get("language")
-            or LANGUAGE_HINT
-            or "Unknown",
+        "content_rating": data.get(
+            "content_rating"
+        ) or "General audience",
 
-        "release_year":
-            year,
+        "tags": data.get("tags")
+        or [],
 
-        "content_rating":
-            data.get("content_rating")
-            or "General audience",
-
-        "tags":
-            data.get("tags")
-            or [],
-
-        "labels":
-            pick_labels(
-                data.get("labels"),
-                site_labels
-            ),
+        "labels": pick_labels(
+            data.get("labels"),
+            site_labels
+        ),
     }
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
+# ---------- post HTML ----------
 def human(n):
-
     n = float(n)
 
     if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f}GB"
 
-        return (
-            f"{n / 1024 ** 3:.1f}GB"
-        )
-
-    return (
-        f"{n / 1024 ** 2:.0f}MB"
-    )
+    return f"{n / 1024 ** 2:.0f}MB"
 
 
 def fmt_runtime(sec):
-
     sec = int(sec)
 
     if sec < 60:
@@ -1186,2522 +839,1321 @@ def fmt_runtime(sec):
     if m < 60:
         return f"{m} min"
 
-    return (
-        f"{m // 60} h "
-        f"{m % 60} min"
-    )
+    return f"{m // 60} h {m % 60} min"
 
 
 def img_url(fid):
-
-    return (
-        f"https://lh3.googleusercontent.com/d/{fid}"
-    )
+    return f"https://lh3.googleusercontent.com/d/{fid}"
 
 
-# ============================================================
-# DOWNLOAD TIMER
-# ============================================================
-
+# ---------- download timer ----------
 TIMER_SCRIPT = """<script>
 (function () {
-
   var WAIT = %d;
+  var btns = document.querySelectorAll('a.mv-dl[data-fid]');
 
-  var btns =
-    document.querySelectorAll(
-      'a.mv-dl[data-fid]'
-    );
-
-  for (
-    var i = 0;
-    i < btns.length;
-    i++
-  ) {
-
+  for (var i = 0; i < btns.length; i++) {
     (function (b) {
-
       var label = b.innerHTML;
       var busy = false;
 
-      b.addEventListener(
-        'click',
-        function (e) {
+      b.addEventListener('click', function (e) {
+        e.preventDefault();
 
-          e.preventDefault();
+        if (busy) {
+          return;
+        }
 
-          if (busy) {
+        busy = true;
+
+        var left = WAIT;
+
+        b.style.opacity = '0.85';
+        b.innerHTML =
+          'Please wait ' + left + ' seconds...';
+
+        var t = setInterval(function () {
+          left--;
+
+          if (left > 0) {
+            b.innerHTML =
+              'Please wait ' + left + ' seconds...';
+
             return;
           }
 
-          busy = true;
-
-          var left = WAIT;
-
-          b.style.opacity =
-            '0.85';
+          clearInterval(t);
 
           b.innerHTML =
-            'Please wait ' +
-            left +
-            ' seconds...';
+            'Download starting...';
 
-          var t = setInterval(
-            function () {
+          window.location.href =
+            'https://drive.usercontent.google.com/download?id=' +
+            b.getAttribute('data-fid') +
+            '&export=download&confirm=t';
 
-              left--;
+          setTimeout(function () {
+            b.innerHTML = label;
+            b.style.opacity = '1';
+            busy = false;
+          }, 6000);
 
-              if (left > 0) {
-
-                b.innerHTML =
-                  'Please wait ' +
-                  left +
-                  ' seconds...';
-
-                return;
-              }
-
-              clearInterval(t);
-
-              b.innerHTML =
-                'Download starting...';
-
-              window.location.href =
-                'https://drive.usercontent.google.com/download?id=' +
-                b.getAttribute(
-                  'data-fid'
-                ) +
-                '&export=download&confirm=t';
-
-              setTimeout(
-                function () {
-
-                  b.innerHTML =
-                    label;
-
-                  b.style.opacity =
-                    '1';
-
-                  busy = false;
-
-                },
-                6000
-              );
-
-            },
-            1000
-          );
-
-        }
-      );
+        }, 1000);
+      });
 
     })(btns[i]);
-
   }
-
 })();
 </script>""" % WAIT_SECONDS
 
 
-# ============================================================
+# ==========================================================
 # CUSTOM VIDEO PLAYER
-# ============================================================
+# ==========================================================
+#
+# IMPORTANT:
+# This is deliberately a NORMAL triple-quoted string.
+# It is NOT an f-string.
+#
+# Therefore JavaScript { } and CSS { } cannot cause:
+# SyntaxError: f-string: single '}' is not allowed
+#
+# Python values are inserted later using .replace().
+# ==========================================================
 
-def build_player(
-    outputs,
-    language
-):
-
-    """
-    Builds the custom player.
-
-    outputs:
-        [(height, drive_file_id, size), ...]
-
-    The Drive IDs are injected directly into
-    the JavaScript configuration.
-    """
-
-    source_map = {}
-
-    for h, fid, size in outputs:
-
-        source_map[str(h)] = (
-            "https://drive.usercontent.google.com/"
-            "download?id="
-            + fid
-            + "&export=download&confirm=t"
-        )
-
-    sources_json = json.dumps(
-        source_map,
-        ensure_ascii=False
-    )
-
-    default_language = (
-        language
-        if language
-        else "Hindi"
-    )
-
-    default_language_js = json.dumps(
-        default_language
-    )
-
-    player = f"""
+PLAYER_TEMPLATE = r"""
 <style>
+.mv-player-wrap {
+    width: 100%;
+    max-width: 100%;
+    margin: 18px auto 28px;
+    box-sizing: border-box;
+}
 
-*{{
-    box-sizing:border-box;
-    -webkit-tap-highlight-color:transparent;
-}}
+.mv-player {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    overflow: hidden;
+    border-radius: 4px;
+    font-family: Arial, Helvetica, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    box-sizing: border-box;
+}
 
-.mv-player{{
-    position:relative;
-    width:100%;
-    max-width:1280px;
-    margin:20px auto;
-    background:#000;
-    aspect-ratio:16/9;
-    overflow:hidden;
-    color:#fff;
-    font-family:Arial,Helvetica,sans-serif;
-}}
+.mv-player *,
+.mv-player *::before,
+.mv-player *::after {
+    box-sizing: border-box;
+}
 
-.mv-player video{{
-    width:100%;
-    height:100%;
-    position:absolute;
-    inset:0;
-    background:#000;
-    object-fit:contain;
-}}
+.mv-player video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: #000;
+    object-fit: contain;
+}
 
-.mv-language{{
-    position:absolute;
-    top:16px;
-    left:16px;
-    z-index:20;
-    background:#35a94b;
-    color:#000;
-    border:0;
-    border-radius:4px;
-    padding:8px 15px;
-    font-size:14px;
-    font-weight:bold;
-}}
+.mv-player .mv-language {
+    position: absolute;
+    left: 14px;
+    top: 12px;
+    z-index: 8;
+    padding: 5px 9px;
+    border-radius: 5px;
+    background: rgba(0, 0, 0, .58);
+    color: #7dff43;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    pointer-events: none;
+}
 
-.mv-center-play{{
-    position:absolute;
-    left:50%;
-    top:50%;
-    transform:translate(-50%,-50%);
-    width:70px;
-    height:70px;
-    border:0;
-    border-radius:50%;
-    background:#35a94b;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    z-index:15;
-    cursor:pointer;
-}}
+.mv-player .mv-center-play {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 7;
+    transform: translate(-50%, -50%);
+    width: 70px;
+    height: 70px;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(70, 184, 42, .96);
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 29px;
+    padding-left: 5px;
+    box-shadow: 0 3px 18px rgba(0,0,0,.38);
+}
 
-.mv-center-play svg{{
-    width:32px;
-    height:32px;
-    fill:#000;
-    margin-left:4px;
-}}
+.mv-player .mv-center-play:hover {
+    background: rgba(87, 205, 50, 1);
+}
 
-.mv-controls{{
-    position:absolute;
-    left:0;
-    right:0;
-    bottom:0;
-    z-index:30;
-    padding:0 16px 9px;
-    background:linear-gradient(
+.mv-player .mv-controls {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 10;
+    padding: 0 13px 10px;
+    background: linear-gradient(
         to top,
-        rgba(0,0,0,.98),
-        rgba(0,0,0,.7),
+        rgba(0,0,0,.88),
+        rgba(0,0,0,.38),
         transparent
     );
-}}
+    opacity: 1;
+    transition: opacity .2s ease;
+}
 
-.mv-progress-area{{
-    width:100%;
-    height:28px;
-    display:flex;
-    align-items:center;
-    cursor:pointer;
-}}
+.mv-player .mv-progress-area {
+    position: relative;
+    height: 18px;
+    padding-top: 8px;
+    cursor: pointer;
+}
 
-.mv-progress{{
-    position:relative;
-    width:100%;
-    height:4px;
-    background:#777;
-    border-radius:5px;
-}}
+.mv-player .mv-progress-bg {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 8px;
+    height: 4px;
+    border-radius: 5px;
+    background: rgba(255,255,255,.25);
+}
 
-.mv-buffer,
-.mv-progress-fill{{
-    position:absolute;
-    left:0;
-    top:0;
-    height:100%;
-    border-radius:5px;
-}}
+.mv-player .mv-buffer {
+    position: absolute;
+    left: 0;
+    top: 8px;
+    height: 4px;
+    width: 0;
+    border-radius: 5px;
+    background: rgba(255,255,255,.42);
+    pointer-events: none;
+}
 
-.mv-buffer{{
-    width:0;
-    background:#aaa;
-}}
+.mv-player .mv-progress {
+    position: absolute;
+    left: 0;
+    top: 8px;
+    height: 4px;
+    width: 0;
+    border-radius: 5px;
+    background: #58c62d;
+    pointer-events: none;
+}
 
-.mv-progress-fill{{
-    width:0;
-    background:#35a94b;
-}}
+.mv-player .mv-handle {
+    position: absolute;
+    top: 5px;
+    left: 0;
+    width: 10px;
+    height: 10px;
+    margin-left: -5px;
+    border-radius: 50%;
+    background: #65d637;
+    box-shadow: 0 0 0 2px rgba(0,0,0,.15);
+    pointer-events: none;
+}
 
-.mv-handle{{
-    position:absolute;
-    top:50%;
-    left:0;
-    width:13px;
-    height:13px;
-    transform:translate(-50%,-50%);
-    background:#fff;
-    border-radius:50%;
-}}
+.mv-player .mv-bottom {
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
 
-.mv-row{{
-    display:flex;
-    align-items:center;
-    height:40px;
-    gap:2px;
-}}
+.mv-player button {
+    border: 0;
+    outline: 0;
+}
 
-.mv-btn{{
-    width:38px;
-    height:38px;
-    border:0;
-    background:transparent;
-    color:#fff;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    cursor:pointer;
-}}
+.mv-player .mv-btn {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex: 0 0 auto;
+}
 
-.mv-btn svg{{
-    width:21px;
-    height:21px;
-    fill:#fff;
-}}
+.mv-player .mv-btn:hover {
+    color: #75df45;
+}
 
-.mv-time{{
-    font-size:13px;
-    white-space:nowrap;
-    margin-left:3px;
-}}
+.mv-player .mv-time {
+    color: #fff;
+    font-size: 12px;
+    white-space: nowrap;
+    line-height: 30px;
+}
 
-.mv-spacer{{
-    flex:1;
-}}
+.mv-player .mv-volume-wrap {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
 
-.mv-volume{{
-    width:75px;
-    height:4px;
-}}
+.mv-player .mv-volume {
+    width: 70px;
+    height: 4px;
+    cursor: pointer;
+    accent-color: #62cc37;
+}
 
-.mv-settings{{
-    position:absolute;
-    right:16px;
-    bottom:67px;
-    width:235px;
-    max-height:350px;
-    overflow-y:auto;
-    background:rgba(20,20,20,.98);
-    border-radius:6px;
-    z-index:100;
-    display:none;
-    box-shadow:0 5px 25px rgba(0,0,0,.7);
-}}
+.mv-player .mv-spacer {
+    flex: 1;
+}
 
-.mv-settings.show{{
-    display:block;
-}}
+.mv-player .mv-settings {
+    position: relative;
+}
 
-.mv-settings-title{{
-    padding:13px;
-    border-bottom:1px solid #444;
-    font-weight:bold;
-}}
+.mv-player .mv-menu {
+    position: absolute;
+    right: 0;
+    bottom: 42px;
+    width: 185px;
+    max-height: 330px;
+    overflow-y: auto;
+    padding: 8px 0;
+    border-radius: 7px;
+    background: rgba(18,18,18,.98);
+    box-shadow: 0 6px 28px rgba(0,0,0,.55);
+    display: none;
+    color: #fff;
+}
 
-.mv-section{{
-    padding:7px 0;
-    border-bottom:1px solid #333;
-}}
+.mv-player .mv-menu.open {
+    display: block;
+}
 
-.mv-section:last-child{{
-    border-bottom:0;
-}}
+.mv-player .mv-menu-title {
+    padding: 7px 13px 5px;
+    color: #9c9c9c;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
 
-.mv-label{{
-    padding:6px 13px;
-    font-size:11px;
-    color:#999;
-    text-transform:uppercase;
-}}
+.mv-player .mv-option {
+    display: block;
+    width: 100%;
+    padding: 9px 13px;
+    text-align: left;
+    color: #fff;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    font-size: 13px;
+}
 
-.mv-option{{
-    width:100%;
-    border:0;
-    background:transparent;
-    color:#fff;
-    padding:11px 13px;
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    text-align:left;
-    cursor:pointer;
-    font-size:14px;
-}}
+.mv-player .mv-option:hover {
+    background: rgba(255,255,255,.09);
+}
 
-.mv-option:hover{{
-    background:#292929;
-}}
+.mv-player .mv-option.active {
+    color: #68d63c;
+}
 
-.mv-option.active{{
-    color:#35a94b;
-}}
+.mv-player .mv-option.hidden-quality {
+    display: none;
+}
 
-.mv-check{{
-    visibility:hidden;
-}}
+.mv-player .mv-loading {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 6;
+    transform: translate(-50%, -50%);
+    width: 42px;
+    height: 42px;
+    border: 4px solid rgba(255,255,255,.25);
+    border-top-color: #62d83b;
+    border-radius: 50%;
+    animation: mvspin .8s linear infinite;
+    display: none;
+}
 
-.mv-option.active .mv-check{{
-    visibility:visible;
-}}
+.mv-player .mv-error {
+    position: absolute;
+    left: 50%;
+    top: 58%;
+    z-index: 9;
+    transform: translate(-50%, -50%);
+    width: 90%;
+    text-align: center;
+    color: #fff;
+    font-size: 13px;
+    background: rgba(0,0,0,.65);
+    padding: 8px 12px;
+    border-radius: 5px;
+    display: none;
+}
 
-@media(max-width:600px){{
+@keyframes mvspin {
+    from {
+        transform: translate(-50%, -50%) rotate(0deg);
+    }
 
-    .mv-language{{
-        top:10px;
-        left:10px;
-        padding:7px 12px;
-        font-size:12px;
-    }}
+    to {
+        transform: translate(-50%, -50%) rotate(360deg);
+    }
+}
 
-    .mv-center-play{{
-        width:60px;
-        height:60px;
-    }}
+@media (max-width: 520px) {
+    .mv-player .mv-bottom {
+        gap: 5px;
+    }
 
-    .mv-center-play svg{{
-        width:27px;
-        height:27px;
-    }}
+    .mv-player .mv-volume {
+        width: 50px;
+    }
 
-    .mv-controls{{
-        padding:0 8px 5px;
-    }}
+    .mv-player .mv-time {
+        font-size: 11px;
+    }
 
-    .mv-btn{{
-        width:34px;
-        height:34px;
-    }}
+    .mv-player .mv-btn {
+        width: 27px;
+        font-size: 16px;
+    }
 
-    .mv-btn svg{{
-        width:18px;
-        height:18px;
-    }}
+    .mv-player .mv-center-play {
+        width: 60px;
+        height: 60px;
+        font-size: 25px;
+    }
 
-    .mv-volume{{
-        display:none;
-    }}
-
-    .mv-time{{
-        font-size:11px;
-    }}
-
-    .mv-settings{{
-        right:8px;
-        bottom:58px;
-        width:205px;
-    }}
-
-}}
-
+    .mv-player .mv-language {
+        left: 9px;
+        top: 8px;
+        font-size: 11px;
+    }
+}
 </style>
 
-
-<div class="mv-player" id="mvPlayer">
-
-    <video
-        id="mvVideo"
-        playsinline
-        preload="metadata">
-    </video>
-
-
-    <div
-        class="mv-language"
-        id="mvLanguage">
-        {html.escape(default_language)}
-    </div>
-
-
-    <button
-        class="mv-center-play"
-        id="mvCenterPlay">
-
-        <svg viewBox="0 0 24 24">
-            <path d="M8 5v14l11-7z"/>
-        </svg>
-
-    </button>
-
-
-    <div
-        class="mv-settings"
-        id="mvSettings">
-
-        <div class="mv-settings-title">
-            Settings
-        </div>
-
-
-        <div class="mv-section">
-
-            <div class="mv-label">
-                Quality
-            </div>
-
-            <div id="mvQualityList">
-
-                <button
-                    class="mv-option active"
-                    data-quality="auto">
-
-                    <span>Auto</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-quality="1080">
-
-                    <span>1080p</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-quality="720">
-
-                    <span>720p</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-quality="480">
-
-                    <span>480p</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-quality="360">
-
-                    <span>360p</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-            </div>
-
-        </div>
-
-
-        <div class="mv-section">
-
-            <div class="mv-label">
-                Language
-            </div>
-
-            <div id="mvLanguageList">
-
-                <button
-                    class="mv-option active"
-                    data-language="hi">
-
-                    <span>Hindi</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-language="en">
-
-                    <span>English</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-language="bn">
-
-                    <span>Bengali</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-language="ar">
-
-                    <span>Arabic</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-            </div>
-
-        </div>
-
-
-        <div class="mv-section">
-
-            <div class="mv-label">
-                Speed
-            </div>
-
-            <div id="mvSpeedList">
-
-                <button
-                    class="mv-option"
-                    data-speed="0.5">
-
-                    <span>0.5x</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-speed="0.75">
-
-                    <span>0.75x</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option active"
-                    data-speed="1">
-
-                    <span>Normal</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-speed="1.25">
-
-                    <span>1.25x</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-speed="1.5">
-
-                    <span>1.5x</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-                <button
-                    class="mv-option"
-                    data-speed="2">
-
-                    <span>2x</span>
-                    <span class="mv-check">✓</span>
-
-                </button>
-
-            </div>
-
-        </div>
-
-
-        <div class="mv-section">
-
-            <button
-                class="mv-option"
-                id="mvFullscreenOption">
-
-                <span>Fullscreen</span>
-                <span>⛶</span>
-
-            </button>
-
-        </div>
-
-    </div>
-
-
-    <div class="mv-controls">
+<div class="mv-player-wrap">
+    <div class="mv-player" id="mvPlayerUnique">
+
+        <video
+            id="mvVideoUnique"
+            playsinline
+            preload="metadata"
+            controlslist="nodownload"
+        ></video>
 
         <div
-            class="mv-progress-area"
-            id="mvProgressArea">
+            class="mv-language"
+            id="mvLanguageUnique"
+        >__PLAYER_LANGUAGE__</div>
 
-            <div class="mv-progress">
+        <button
+            class="mv-center-play"
+            id="mvCenterPlayUnique"
+            type="button"
+            aria-label="Play"
+        >▶</button>
+
+        <div
+            class="mv-loading"
+            id="mvLoadingUnique"
+        ></div>
+
+        <div
+            class="mv-error"
+            id="mvErrorUnique"
+        >Unable to load this video.</div>
+
+        <div class="mv-controls">
+
+            <div
+                class="mv-progress-area"
+                id="mvProgressAreaUnique"
+            >
+                <div class="mv-progress-bg"></div>
 
                 <div
                     class="mv-buffer"
-                    id="mvBuffer">
-                </div>
+                    id="mvBufferUnique"
+                ></div>
 
                 <div
-                    class="mv-progress-fill"
-                    id="mvFill">
-                </div>
+                    class="mv-progress"
+                    id="mvProgressUnique"
+                ></div>
 
                 <div
                     class="mv-handle"
-                    id="mvHandle">
+                    id="mvHandleUnique"
+                ></div>
+            </div>
+
+            <div class="mv-bottom">
+
+                <button
+                    class="mv-btn"
+                    id="mvPlayUnique"
+                    type="button"
+                    aria-label="Play/Pause"
+                >▶</button>
+
+                <div
+                    class="mv-time"
+                    id="mvTimeUnique"
+                >00:00 / 00:00</div>
+
+                <div class="mv-volume-wrap">
+
+                    <button
+                        class="mv-btn"
+                        id="mvMuteUnique"
+                        type="button"
+                        aria-label="Mute"
+                    >🔊</button>
+
+                    <input
+                        class="mv-volume"
+                        id="mvVolumeUnique"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value="1"
+                        aria-label="Volume"
+                    >
+
                 </div>
 
+                <div class="mv-spacer"></div>
+
+                <div class="mv-settings">
+
+                    <button
+                        class="mv-btn"
+                        id="mvSettingsBtnUnique"
+                        type="button"
+                        aria-label="Settings"
+                    >⚙</button>
+
+                    <div
+                        class="mv-menu"
+                        id="mvSettingsMenuUnique"
+                    >
+
+                        <div class="mv-menu-title">
+                            Quality
+                        </div>
+
+                        <button
+                            class="mv-option"
+                            data-quality="auto"
+                            type="button"
+                        >Auto</button>
+
+                        <button
+                            class="mv-option"
+                            data-quality="1080"
+                            type="button"
+                        >1080p</button>
+
+                        <button
+                            class="mv-option"
+                            data-quality="720"
+                            type="button"
+                        >720p</button>
+
+                        <button
+                            class="mv-option"
+                            data-quality="480"
+                            type="button"
+                        >480p</button>
+
+                        <button
+                            class="mv-option"
+                            data-quality="360"
+                            type="button"
+                        >360p</button>
+
+                        <div class="mv-menu-title">
+                            Language
+                        </div>
+
+                        <button
+                            class="mv-option mv-language-option"
+                            data-language="Hindi"
+                            type="button"
+                        >Hindi</button>
+
+                        <button
+                            class="mv-option mv-language-option"
+                            data-language="English"
+                            type="button"
+                        >English</button>
+
+                        <button
+                            class="mv-option mv-language-option"
+                            data-language="Bengali"
+                            type="button"
+                        >Bengali</button>
+
+                        <button
+                            class="mv-option mv-language-option"
+                            data-language="Arabic"
+                            type="button"
+                        >Arabic</button>
+
+                        <div class="mv-menu-title">
+                            Speed
+                        </div>
+
+                        <button
+                            class="mv-option mv-speed-option"
+                            data-speed="0.5"
+                            type="button"
+                        >0.5x</button>
+
+                        <button
+                            class="mv-option mv-speed-option"
+                            data-speed="0.75"
+                            type="button"
+                        >0.75x</button>
+
+                        <button
+                            class="mv-option mv-speed-option active"
+                            data-speed="1"
+                            type="button"
+                        >1x</button>
+
+                        <button
+                            class="mv-option mv-speed-option"
+                            data-speed="1.25"
+                            type="button"
+                        >1.25x</button>
+
+                        <button
+                            class="mv-option mv-speed-option"
+                            data-speed="1.5"
+                            type="button"
+                        >1.5x</button>
+
+                        <button
+                            class="mv-option mv-speed-option"
+                            data-speed="2"
+                            type="button"
+                        >2x</button>
+
+                        <div class="mv-menu-title">
+                            Screen
+                        </div>
+
+                        <button
+                            class="mv-option"
+                            id="mvFullscreenMenuUnique"
+                            type="button"
+                        >Fullscreen</button>
+
+                    </div>
+                </div>
+
+                <button
+                    class="mv-btn"
+                    id="mvFullscreenUnique"
+                    type="button"
+                    aria-label="Fullscreen"
+                >⛶</button>
+
             </div>
-
         </div>
-
-
-        <div class="mv-row">
-
-            <button
-                class="mv-btn"
-                id="mvPlay">
-
-                <svg
-                    id="mvPlayIcon"
-                    viewBox="0 0 24 24">
-
-                    <path d="M8 5v14l11-7z"/>
-
-                </svg>
-
-            </button>
-
-
-            <div class="mv-time">
-
-                <span id="mvCurrent">
-                    0:00
-                </span>
-
-                &nbsp;/&nbsp;
-
-                <span id="mvTotal">
-                    0:00
-                </span>
-
-            </div>
-
-
-            <button
-                class="mv-btn"
-                id="mvMute">
-
-                <svg viewBox="0 0 24 24">
-
-                    <path d="
-                    M4 9v6h4l5 4V5L8 9H4z
-                    M16 8.5a5 5 0 0 1 0 7
-                    M18.5 6a8.5 8.5 0 0 1 0 12"/>
-
-                </svg>
-
-            </button>
-
-
-            <input
-                class="mv-volume"
-                id="mvVolume"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value="1">
-
-
-            <div class="mv-spacer"></div>
-
-
-            <button
-                class="mv-btn"
-                id="mvSettingsButton">
-
-                <svg viewBox="0 0 24 24">
-
-                    <path d="
-                    M19.43 12.98
-                    c.04-.32.07-.65.07-.98
-                    s-.02-.66-.07-.98
-                    l2.11-1.65
-                    -.2-.35-2.49-4.31
-                    -.42.18-2.49 1
-                    c-.51-.4-1.08-.73-1.69-.98
-                    L13.95 2h-3.9
-                    l-.3 2.91
-                    c-.61.25-1.18.59-1.69.98
-                    l-2.49-1-.42-.18
-                    -2.49 4.31-.2.35
-                    2.11 1.65
-                    c-.04.32-.08.65-.08.98
-                    s.03.66.08.98
-                    l-2.11 1.65
-                    .2.35 2.49 4.31
-                    .42-.18 2.49-1
-                    c.51.4 1.08.73 1.69.98
-                    L10.05 22h3.9
-                    l.3-2.91
-                    c.61-.25 1.18-.58 1.69-.98
-                    l2.49 1 .42.18
-                    2.49-4.31.2-.35
-                    -2.11-1.65z
-                    M12 15.5
-                    A3.5 3.5 0 1 1
-                    12 8.5
-                    A3.5 3.5 0 0 1
-                    12 15.5z"/>
-
-                </svg>
-
-            </button>
-
-
-            <button
-                class="mv-btn"
-                id="mvFullscreen">
-
-                <svg viewBox="0 0 24 24">
-
-                    <path d="
-                    M4 4h6v2H6v4H4V4z
-                    M14 4h6v6h-2V6h-4V4z
-                    M4 14h2v4h4v2H4v-6z
-                    M18 14h2v6h-6v-2h4v-4z"/>
-
-                </svg>
-
-            </button>
-
-        </div>
-
     </div>
-
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/hls.js@0.14.17"></script>
 
 <script>
+(function () {
 
-(function(){{
+    var VIDEO_SOURCES = __VIDEO_SOURCES__;
 
-    /* ======================================================
-       VIDEO SOURCES GENERATED BY BOT
-       ====================================================== */
+    var DEFAULT_LANGUAGE = __PLAYER_LANGUAGE_JSON__;
 
-    const VIDEO_SOURCES =
-        {sources_json};
-
-
-    const DEFAULT_LANGUAGE =
-        {default_language_js};
-
-
-    /* ======================================================
-       ELEMENTS
-       ====================================================== */
-
-    const video =
-        document.getElementById(
-            "mvVideo"
-        );
-
-    const player =
-        document.getElementById(
-            "mvPlayer"
-        );
-
-    const play =
-        document.getElementById(
-            "mvPlay"
-        );
-
-    const centerPlay =
-        document.getElementById(
-            "mvCenterPlay"
-        );
-
-    const playIcon =
-        document.getElementById(
-            "mvPlayIcon"
-        );
-
-    const current =
-        document.getElementById(
-            "mvCurrent"
-        );
-
-    const total =
-        document.getElementById(
-            "mvTotal"
-        );
-
-    const fill =
-        document.getElementById(
-            "mvFill"
-        );
-
-    const handle =
-        document.getElementById(
-            "mvHandle"
-        );
-
-    const buffer =
-        document.getElementById(
-            "mvBuffer"
-        );
-
-    const progressArea =
-        document.getElementById(
-            "mvProgressArea"
-        );
-
-    const volume =
-        document.getElementById(
-            "mvVolume"
-        );
-
-    const mute =
-        document.getElementById(
-            "mvMute"
-        );
-
-    const settingsButton =
-        document.getElementById(
-            "mvSettingsButton"
-        );
-
-    const settings =
-        document.getElementById(
-            "mvSettings"
-        );
-
-    const fullscreen =
-        document.getElementById(
-            "mvFullscreen"
-        );
-
-    const fullscreenOption =
-        document.getElementById(
-            "mvFullscreenOption"
-        );
-
-    const languageLabel =
-        document.getElementById(
-            "mvLanguage"
-        );
-
-
-    /* ======================================================
-       FORMAT TIME
-       ====================================================== */
-
-    function formatTime(seconds){{
-
-        if(!isFinite(seconds))
-            return "0:00";
-
-        seconds =
-            Math.floor(seconds);
-
-        const minutes =
-            Math.floor(seconds / 60);
-
-        const secs =
-            seconds % 60;
-
-        return (
-            minutes +
-            ":" +
-            String(secs)
-                .padStart(2,"0")
-        );
-
-    }}
-
-
-    /* ======================================================
-       LOAD VIDEO
-       ====================================================== */
-
-    function loadVideo(
-        quality,
-        restoreTime,
-        wasPlaying
-    ){{
-
-        const url =
-            VIDEO_SOURCES[
-                String(quality)
-            ];
-
-        if(!url)
-            return;
-
-        video.src = url;
-
-        video.load();
-
-        video.addEventListener(
-            "loadedmetadata",
-            function restore(){{
-                
-                if(
-                    restoreTime !== null &&
-                    isFinite(restoreTime)
-                ){{
-                    try{{
-                        video.currentTime =
-                            Math.min(
-                                restoreTime,
-                                video.duration || restoreTime
-                            );
-                    }}catch(e){{}}
-                }}
-
-                if(wasPlaying){{
-                    video.play()
-                        .catch(function(){{}});
-                }}
-
-                video.removeEventListener(
-                    "loadedmetadata",
-                    restore
-                );
-
-            }}
-        );
-
-    }}
-
-
-    /* ======================================================
-       INITIAL QUALITY
-
-       Prefer 720p if available.
-       Otherwise highest available.
-       ====================================================== */
-
-    let currentQuality = null;
-
-    if(VIDEO_SOURCES["720"]){{
-        currentQuality = "720";
-    }}
-    else if(VIDEO_SOURCES["1080"]){{
-        currentQuality = "1080";
-    }}
-    else if(VIDEO_SOURCES["480"]){{
-        currentQuality = "480";
-    }}
-    else if(VIDEO_SOURCES["360"]){{
-        currentQuality = "360";
-    }}
-
-
-    if(currentQuality){{
-        loadVideo(
-            currentQuality,
-            null,
-            false
-        );
-    }}
-
-
-    /* ======================================================
-       PLAY / PAUSE
-       ====================================================== */
-
-    function togglePlay(){{
-
-        if(video.paused){{
-
-            video.play()
-                .catch(function(){{}});
-
-        }}else{{
-
-            video.pause();
-
-        }}
-
-    }}
-
-
-    play.addEventListener(
-        "click",
-        togglePlay
+    var video = document.getElementById(
+        'mvVideoUnique'
     );
 
-    centerPlay.addEventListener(
-        "click",
-        togglePlay
+    var player = document.getElementById(
+        'mvPlayerUnique'
     );
 
-
-    video.addEventListener(
-        "play",
-        function(){{
-
-            playIcon.innerHTML =
-                '<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>';
-
-            centerPlay.style.display =
-                "none";
-
-        }}
+    var centerPlay = document.getElementById(
+        'mvCenterPlayUnique'
     );
 
-
-    video.addEventListener(
-        "pause",
-        function(){{
-
-            playIcon.innerHTML =
-                '<path d="M8 5v14l11-7z"/>';
-
-            centerPlay.style.display =
-                "flex";
-
-        }}
+    var playBtn = document.getElementById(
+        'mvPlayUnique'
     );
 
-
-    /* ======================================================
-       METADATA
-       ====================================================== */
-
-    video.addEventListener(
-        "loadedmetadata",
-        function(){{
-
-            total.textContent =
-                formatTime(
-                    video.duration
-                );
-
-        }}
+    var muteBtn = document.getElementById(
+        'mvMuteUnique'
     );
 
-
-    /* ======================================================
-       TIME
-       ====================================================== */
-
-    video.addEventListener(
-        "timeupdate",
-        function(){{
-
-            if(!video.duration)
-                return;
-
-            const percent =
-                (
-                    video.currentTime /
-                    video.duration
-                ) * 100;
-
-            fill.style.width =
-                percent + "%";
-
-            handle.style.left =
-                percent + "%";
-
-            current.textContent =
-                formatTime(
-                    video.currentTime
-                );
-
-        }}
+    var volume = document.getElementById(
+        'mvVolumeUnique'
     );
 
-
-    /* ======================================================
-       SEEK
-       ====================================================== */
-
-    progressArea.addEventListener(
-        "click",
-        function(e){{
-
-            if(!video.duration)
-                return;
-
-            const rect =
-                this.getBoundingClientRect();
-
-            const percent =
-                (
-                    e.clientX -
-                    rect.left
-                ) / rect.width;
-
-            video.currentTime =
-                percent *
-                video.duration;
-
-        }}
+    var timeText = document.getElementById(
+        'mvTimeUnique'
     );
 
+    var progressArea = document.getElementById(
+        'mvProgressAreaUnique'
+    );
 
-    /* ======================================================
-       BUFFER
-       ====================================================== */
+    var progress = document.getElementById(
+        'mvProgressUnique'
+    );
 
-    video.addEventListener(
-        "progress",
-        function(){{
+    var buffer = document.getElementById(
+        'mvBufferUnique'
+    );
 
-            if(
-                !video.duration ||
-                !video.buffered.length
-            )
-                return;
+    var handle = document.getElementById(
+        'mvHandleUnique'
+    );
 
-            try{{
+    var settingsBtn = document.getElementById(
+        'mvSettingsBtnUnique'
+    );
 
-                const end =
+    var settingsMenu = document.getElementById(
+        'mvSettingsMenuUnique'
+    );
+
+    var fullscreenBtn = document.getElementById(
+        'mvFullscreenUnique'
+    );
+
+    var fullscreenMenu = document.getElementById(
+        'mvFullscreenMenuUnique'
+    );
+
+    var languageLabel = document.getElementById(
+        'mvLanguageUnique'
+    );
+
+    var loading = document.getElementById(
+        'mvLoadingUnique'
+    );
+
+    var errorBox = document.getElementById(
+        'mvErrorUnique'
+    );
+
+    var hls = null;
+
+    var currentQuality = null;
+
+    function formatTime(seconds) {
+
+        if (!isFinite(seconds)) {
+            return '00:00';
+        }
+
+        seconds = Math.max(
+            0,
+            Math.floor(seconds)
+        );
+
+        var hours = Math.floor(
+            seconds / 3600
+        );
+
+        var minutes = Math.floor(
+            (seconds % 3600) / 60
+        );
+
+        var secs = seconds % 60;
+
+        if (hours > 0) {
+
+            return String(hours).padStart(2, '0') +
+                ':' +
+                String(minutes).padStart(2, '0') +
+                ':' +
+                String(secs).padStart(2, '0');
+
+        }
+
+        return String(minutes).padStart(2, '0') +
+            ':' +
+            String(secs).padStart(2, '0');
+    }
+
+
+    function showLoading(show) {
+
+        loading.style.display =
+            show ? 'block' : 'none';
+
+    }
+
+
+    function showError(show) {
+
+        errorBox.style.display =
+            show ? 'block' : 'none';
+
+    }
+
+
+    function updatePlayButton() {
+
+        if (video.paused) {
+
+            playBtn.innerHTML = '▶';
+            centerPlay.style.display = 'flex';
+
+        } else {
+
+            playBtn.innerHTML = '❚❚';
+            centerPlay.style.display = 'none';
+
+        }
+
+    }
+
+
+    function updateMuteButton() {
+
+        if (
+            video.muted ||
+            video.volume === 0
+        ) {
+
+            muteBtn.innerHTML = '🔇';
+
+        } else {
+
+            muteBtn.innerHTML = '🔊';
+
+        }
+
+    }
+
+
+    function updateTime() {
+
+        var duration =
+            video.duration || 0;
+
+        var current =
+            video.currentTime || 0;
+
+        timeText.innerHTML =
+            formatTime(current) +
+            ' / ' +
+            formatTime(duration);
+
+        var percent = 0;
+
+        if (duration > 0) {
+
+            percent =
+                (current / duration) * 100;
+
+        }
+
+        progress.style.width =
+            percent + '%';
+
+        handle.style.left =
+            percent + '%';
+
+    }
+
+
+    function updateBuffer() {
+
+        try {
+
+            if (
+                video.buffered &&
+                video.buffered.length &&
+                video.duration
+            ) {
+
+                var end =
                     video.buffered.end(
                         video.buffered.length - 1
                     );
 
-                const percent =
-                    (
-                        end /
-                        video.duration
-                    ) * 100;
+                var percent =
+                    (end / video.duration) * 100;
 
                 buffer.style.width =
                     Math.min(
-                        percent,
-                        100
-                    ) + "%";
-
-            }}catch(e){{}}
-
-        }}
-    );
-
-
-    /* ======================================================
-       VOLUME
-       ====================================================== */
-
-    volume.addEventListener(
-        "input",
-        function(){{
-
-            video.volume =
-                Number(this.value);
-
-            video.muted =
-                video.volume === 0;
-
-        }}
-    );
-
-
-    mute.addEventListener(
-        "click",
-        function(){{
-
-            video.muted =
-                !video.muted;
-
-            volume.value =
-                video.muted
-                ? 0
-                : video.volume || 1;
-
-        }}
-    );
-
-
-    /* ======================================================
-       SETTINGS
-       ====================================================== */
-
-    settingsButton.addEventListener(
-        "click",
-        function(e){{
-
-            e.stopPropagation();
-
-            settings.classList.toggle(
-                "show"
-            );
-
-        }}
-    );
-
-
-    settings.addEventListener(
-        "click",
-        function(e){{
-
-            e.stopPropagation();
-
-        }}
-    );
-
-
-    document.addEventListener(
-        "click",
-        function(){{
-
-            settings.classList.remove(
-                "show"
-            );
-
-        }}
-    );
-
-
-    /* ======================================================
-       QUALITY
-       ====================================================== */
-
-    document
-        .getElementById(
-            "mvQualityList"
-        )
-        .querySelectorAll(
-            ".mv-option"
-        )
-        .forEach(
-            function(button){{
-
-                button.addEventListener(
-                    "click",
-                    function(){{
-
-                        const quality =
-                            this.dataset.quality;
-
-
-                        /*
-                         * AUTO
-                         *
-                         * With separate MP4 files,
-                         * true adaptive Auto is not possible.
-                         *
-                         * Therefore Auto keeps the
-                         * currently selected source.
-                         */
-
-                        if(
-                            quality === "auto"
-                        ){{
-
-                            document
-                                .querySelectorAll(
-                                    "#mvQualityList .mv-option"
-                                )
-                                .forEach(
-                                    function(b){{
-                                        b.classList.remove(
-                                            "active"
-                                        );
-                                    }}
-                                );
-
-                            this.classList.add(
-                                "active"
-                            );
-
-                            return;
-
-                        }}
-
-
-                        const url =
-                            VIDEO_SOURCES[
-                                quality
-                            ];
-
-                        if(!url)
-                            return;
-
-
-                        const wasPlaying =
-                            !video.paused;
-
-                        const time =
-                            video.currentTime;
-
-
-                        currentQuality =
-                            quality;
-
-
-                        document
-                            .querySelectorAll(
-                                "#mvQualityList .mv-option"
-                            )
-                            .forEach(
-                                function(b){{
-                                    b.classList.remove(
-                                        "active"
-                                    );
-                                }}
-                            );
-
-                        this.classList.add(
-                            "active"
-                        );
-
-
-                        loadVideo(
-                            quality,
-                            time,
-                            wasPlaying
-                        );
-
-                    }}
-                );
+                        100,
+                        percent
+                    ) + '%';
 
             }
-        );
 
+        } catch (e) {}
 
-    /* ======================================================
-       LANGUAGE
-       ====================================================== */
-
-    document
-        .getElementById(
-            "mvLanguageList"
-        )
-        .querySelectorAll(
-            ".mv-option"
-        )
-        .forEach(
-            function(button){{
-
-                button.addEventListener(
-                    "click",
-                    function(){{
-
-                        /*
-                         * The bot currently uploads
-                         * one audio-language version.
-                         *
-                         * This selector changes the
-                         * visible language label.
-                         *
-                         * Real audio switching requires
-                         * separate language sources or
-                         * HLS audio tracks.
-                         */
-
-                        const name =
-                            this.querySelector(
-                                "span"
-                            ).textContent;
-
-                        languageLabel.textContent =
-                            name;
-
-
-                        document
-                            .querySelectorAll(
-                                "#mvLanguageList .mv-option"
-                            )
-                            .forEach(
-                                function(b){{
-                                    b.classList.remove(
-                                        "active"
-                                    );
-                                }}
-                            );
-
-                        this.classList.add(
-                            "active"
-                        );
-
-                    }}
-                );
-
-            }}
-        );
-
-
-    /* ======================================================
-       SPEED
-       ====================================================== */
-
-    document
-        .getElementById(
-            "mvSpeedList"
-        )
-        .querySelectorAll(
-            ".mv-option"
-        )
-        .forEach(
-            function(button){{
-
-                button.addEventListener(
-                    "click",
-                    function(){{
-
-                        video.playbackRate =
-                            Number(
-                                this.dataset.speed
-                            );
-
-
-                        document
-                            .querySelectorAll(
-                                "#mvSpeedList .mv-option"
-                            )
-                            .forEach(
-                                function(b){{
-                                    b.classList.remove(
-                                        "active"
-                                    );
-                                }}
-                            );
-
-                        this.classList.add(
-                            "active"
-                        );
-
-                    }}
-                );
-
-            }}
-        );
-
-
-    /* ======================================================
-       FULLSCREEN
-       ====================================================== */
-
-    async function goFullscreen(){{
-
-        try{{
-
-            if(
-                !document.fullscreenElement
-            ){{
-
-                if(
-                    player.requestFullscreen
-                ){{
-                    await player.requestFullscreen();
-                }}
-                else if(
-                    player.webkitRequestFullscreen
-                ){{
-                    player.webkitRequestFullscreen();
-                }}
-
-            }}
-            else{{
-
-                if(
-                    document.exitFullscreen
-                ){{
-                    await document.exitFullscreen();
-                }}
-
-            }}
-
-        }}
-        catch(error){{
-
-            console.log(error);
-
-        }}
-
-    }}
-
-
-    fullscreen.addEventListener(
-        "click",
-        goFullscreen
-    );
-
-    fullscreenOption.addEventListener(
-        "click",
-        goFullscreen
-    );
-
-
-    /* ======================================================
-       DOUBLE CLICK FULLSCREEN
-       ====================================================== */
-
-    video.addEventListener(
-        "dblclick",
-        goFullscreen
-    );
-
-
-    /* ======================================================
-       KEYBOARD CONTROLS
-       ====================================================== */
-
-    document.addEventListener(
-        "keydown",
-        function(e){{
-
-            if(
-                e.target &&
-                (
-                    e.target.tagName === "INPUT" ||
-                    e.target.tagName === "TEXTAREA"
-                )
-            ){{
-                return;
-            }}
-
-
-            if(e.code === "Space"){{
-
-                e.preventDefault();
-
-                togglePlay();
-
-            }}
-
-
-            if(e.code === "ArrowRight"){{
-
-                video.currentTime =
-                    Math.min(
-                        video.duration || 0,
-                        video.currentTime + 5
-                    );
-
-            }}
-
-
-            if(e.code === "ArrowLeft"){{
-
-                video.currentTime =
-                    Math.max(
-                        0,
-                        video.currentTime - 5
-                    );
-
-            }}
-
-        }}
-    );
-
-
-}})();
-
-</script>
-"""
-
-    return player
-
-
-# ============================================================
-# POST HTML
-# ============================================================
-
-def build_html(
-    meta,
-    thumb_id,
-    shot_ids,
-    outputs,
-    fps,
-    dur
-):
-
-    e = html.escape
-
-    title = e(
-        meta["title"]
-    )
-
-    year = meta["release_year"]
-
-    ytxt = (
-        f" ({year})"
-        if year
-        else ""
-    )
-
-    lang_known = (
-        meta["language"]
-        and
-        meta["language"].lower()
-        != "unknown"
-    )
-
-    lang = e(
-        meta["language"]
-    )
-
-    lang_tag = (
-        f' <span style="color:#f2f200">'
-        f'{{{lang}}}</span>'
-        if lang_known
-        else ""
-    )
-
-    genres = ", ".join(
-        e(g)
-        for g in meta["genres"]
-    )
-
-    # IMPORTANT:
-    # 23.976 -> 24fps
-    fps_txt = fmt_fps(
-        fps
-    )
-
-    qualities = " - ".join(
-        f"{h}p"
-        for h, _, _ in outputs
-    )
-
-    sizes = " - ".join(
-        human(s)
-        for _, _, s in outputs
-    )
-
-
-    syn = [
-        e(p)
-        for p in meta["synopsis"]
-    ]
-
-    review = [
-        e(p)
-        for p in meta["review"]
-    ]
-
-
-    # ========================================================
-    # BUTTON STYLE
-    # ========================================================
-
-    btn = (
-        "display:block;"
-        "width:260px;"
-        "max-width:90%;"
-        "margin:0 auto 28px;"
-        "padding:18px 10px;"
-        "text-align:center;"
-        "color:#fff;"
-        "font-weight:800;"
-        "font-size:19px;"
-        "text-decoration:none;"
-        "cursor:pointer;"
-        "background:linear-gradient("
-        "90deg,#57a51c,#1f4fb4"
-        ");"
-        "box-shadow:0 8px 14px "
-        "rgba(0,0,0,.45);"
-    )
-
-    head = (
-        "text-align:center;"
-        "color:#fff;"
-        "font-size:21px;"
-        "line-height:1.4;"
-        "margin:28px 0 18px;"
-        "font-weight:800"
-    )
-
-    hr = (
-        '<hr style="border:0;'
-        'border-top:1px solid '
-        'rgba(255,255,255,.6);'
-        'margin:22px 0"/>'
-    )
-
-    h3 = (
-        '<h3 style="text-align:center">{}</h3>'
-    )
-
-
-    # ========================================================
-    # INFO
-    # ========================================================
-
-    info = [
-        f"<b>Movie Name:</b> {title}"
-    ]
-
-    if year:
-
-        info.append(
-            f"<b>Release Year:</b> {year}"
-        )
-
-    if DIRECTOR_NAME:
-
-        info.append(
-            f"<b>Directed by:</b> "
-            f"{e(DIRECTOR_NAME)}"
-        )
-
-    if lang_known:
-
-        info.append(
-            f"<b>Language:</b> {lang}"
-        )
-
-    info += [
-
-        f"<b>Runtime:</b> "
-        f"{fmt_runtime(dur)}",
-
-        f"<b>Genres:</b> "
-        f"{genres}",
-
-        f"<b>Content Advisory:</b> "
-        f"{e(meta['content_rating'])}",
-
-        f"<b>Quality:</b> "
-        f"{qualities}",
-
-        f"<b>Frame Rate:</b> "
-        f"{fps_txt}fps",
-
-        f"<b>Size:</b> "
-        f"{sizes}",
-    ]
-
-
-    # ========================================================
-    # HTML PARTS
-    # ========================================================
-
-    parts = [
-
-        f'''
-        <div style="text-align:center">
-            <img
-                src="{img_url(thumb_id)}"
-                alt="{title}"
-                width="270"
-                style="
-                    max-width:60%;
-                    height:auto;
-                    border-radius:8px
-                "
-            />
-        </div>
-        ''',
-
-        f'''
-        <p style="text-align:center">
-            <b>
-                {title}{ytxt}
-            </b>
-            {
-                " - " + lang + " film"
-                if lang_known
-                else ""
-            }
-        </p>
-        '''
-    ]
-
-
-    if meta["tagline"]:
-
-        parts.append(
-            f'''
-            <p style="text-align:center">
-                <i>
-                    {e(meta["tagline"])}
-                </i>
-            </p>
-            '''
-        )
-
-
-    parts.append(
-        f"<p>{syn[0]}</p>"
-    )
-
-
-    parts.append(
-        h3.format(
-            "Movie Info"
-        )
-    )
-
-
-    parts.append(
-        "<p>"
-        +
-        "<br/>".join(info)
-        +
-        "</p>"
-    )
-
-
-    parts.append(
-        h3.format(
-            "Movie Synopsis / Plot"
-        )
-    )
-
-
-    parts += [
-        f"<p>{p}</p>"
-        for p in syn
-    ]
-
-
-    # ========================================================
-    # CUSTOM PLAYER
-    # ========================================================
-
-    parts.append(
-        h3.format(
-            f"Watch {title} Online"
-        )
-    )
-
-
-    parts.append(
-        build_player(
-            outputs,
-            meta["language"]
-        )
-    )
-
-
-    # ========================================================
-    # REVIEW
-    # ========================================================
-
-    if review:
-
-        parts.append(
-            h3.format(
-                f"{title} - "
-                "Film Review and Analysis"
-            )
-        )
-
-        parts += [
-            f"<p>{p}</p>"
-            for p in review
-        ]
-
-
-    # ========================================================
-    # THEMES
-    # ========================================================
-
-    if meta["themes"]:
-
-        parts.append(
-            h3.format(
-                "Themes"
-            )
-        )
-
-        parts.append(
-            "<ul>"
-            +
-            "".join(
-                f"<li>{e(t)}</li>"
-                for t in meta["themes"]
-            )
-            +
-            "</ul>"
-        )
-
-
-    # ========================================================
-    # SCREENSHOTS
-    # ========================================================
-
-    parts.append(
-        h3.format(
-            "Screenshots"
-        )
-    )
-
-    for fid in shot_ids:
-
-        parts.append(
-            f'''
-            <p style="text-align:center">
-                <img
-                    src="{img_url(fid)}"
-                    alt="{title} screenshot"
-                    style="
-                        max-width:100%;
-                        height:auto
-                    "
-                />
-            </p>
-            '''
-        )
-
-
-    parts.append(hr)
-
-
-    # ========================================================
-    # DOWNLOAD LINKS
-    # ========================================================
-
-    parts.append(
-        h3.format(
-            "Download Links"
-        )
-    )
-
-
-    for h, fid, size in outputs:
-
-        direct = (
-            "https://drive.usercontent.google.com/"
-            "download?id="
-            f"{fid}"
-            "&amp;export=download"
-            "&amp;confirm=t"
-        )
-
-        parts.append(
-            f'''
-            <h4 style="{head}">
-                {title}{ytxt}{lang_tag}
-                {h}p x264 {fps_txt}fps
-                [{human(size)}]
-            </h4>
-            '''
-        )
-
-        parts.append(
-            f'''
-            <a
-                class="mv-dl"
-                data-fid="{fid}"
-                href="{direct}"
-                rel="noopener"
-                style="{btn}"
-            >
-                &#11015;&#9889;
-                DOWNLOAD NOW
-                &#9889;&#11015;
-            </a>
-            '''
-        )
-
-
-    parts.append(hr)
-
-
-    # ========================================================
-    # FAQ
-    # ========================================================
-
-    if meta["faq"]:
-
-        parts.append(
-            h3.format(
-                f"{title} - FAQ"
-            )
-        )
-
-        for f in meta["faq"]:
-
-            parts.append(
-                f"""
-                <h4>
-                    {e(str(f['q']))}
-                </h4>
-
-                <p>
-                    {e(str(f['a']))}
-                </p>
-                """
-            )
-
-
-    # ========================================================
-    # END
-    # ========================================================
-
-    parts.append(
-        '''
-        <h3
-            style="
-                text-align:center;
-                color:#f0a0ff
-            "
-        >
-            Winding Up &#10084;&#65039;
-        </h3>
-        '''
-    )
-
-
-    parts.append(
-        TIMER_SCRIPT
-    )
-
-
-    return "\n".join(parts)
-
-
-# ============================================================
-# MAIN PROCESS
-# ============================================================
-
-def process(
-    video,
-    processed_folder,
-    output_folder
-):
-
-    name = video["name"]
-
-    log(
-        f"\n=== Processing: {name} ==="
-    )
-
-    job = (
-        WORK /
-        video["id"]
-    )
-
-    job.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    src = str(
-        job /
-        "source.mp4"
-    )
-
-    slug = re.sub(
-        r"[^a-zA-Z0-9]+",
-        "-",
-        Path(name).stem
-    ).strip("-").lower() or "movie"
-
-
-    # ========================================================
-    # DOWNLOAD ORIGINAL
-    # ========================================================
-
-    log(
-        "Downloading original..."
-    )
-
-    download(
-        video["id"],
-        src
-    )
-
-
-    # ========================================================
-    # PROBE
-    # ========================================================
-
-    dur, w, h, fps = probe(
-        src
-    )
-
-    short = min(
-        w,
-        h
-    )
-
-    log(
-        f"Duration {dur / 60:.1f} min, "
-        f"{w}x{h}, "
-        f"{fps:.3f} fps "
-        f"(display: {fmt_fps(fps)}fps)"
-    )
-
-
-    # ========================================================
-    # SCREENSHOTS / THUMBNAIL
-    # ========================================================
-
-    log(
-        "Making screenshots and thumbnail..."
-    )
-
-    shots = make_screenshots(
-        src,
-        dur,
-        job
-    )
-
-    thumb = make_thumbnail(
-        src,
-        dur,
-        w,
-        h,
-        job
-    )
-
-
-    # ========================================================
-    # GEMINI
-    # ========================================================
-
-    log(
-        "Analysing with Gemini..."
-    )
-
-    site_labels = get_site_labels()
-
-    frames, audio = analysis_inputs(
-        src,
-        dur,
-        job
-    )
-
-    meta = analyze(
-        name,
-        frames,
-        audio,
-        site_labels
-    )
-
-    log(
-        "  Title:",
-        meta["title"]
-    )
-
-    log(
-        "  Labels:",
-        meta["labels"]
-    )
-
-
-    # ========================================================
-    # RESOLUTIONS
-    # ========================================================
-
-    targets = sorted({
-        t
-        for t in RESOLUTIONS
-        if t <= short * 1.05
-    }) or [short]
-
-
-    outputs = []
-
-
-    # ========================================================
-    # TRANSCODE + UPLOAD
-    # ========================================================
-
-    for t in targets:
-
-        out = str(
-            job /
-            f"{slug}_{t}p.mp4"
-        )
-
-        log(
-            f"Converting to {t}p..."
-        )
-
-        transcode(
-            src,
-            t,
-            w,
-            h,
-            out
-        )
-
-        size = os.path.getsize(
-            out
-        )
-
-        log(
-            f"Uploading {t}p "
-            f"({human(size)})..."
-        )
-
-        fid = upload_public(
-            out,
-            output_folder,
-            "video/mp4"
-        )
-
-        outputs.append(
-            (
-                t,
-                fid,
-                size
-            )
-        )
-
-        os.remove(
-            out
-        )
-
-
-    # ========================================================
-    # UPLOAD IMAGES
-    # ========================================================
-
-    log(
-        "Uploading images..."
-    )
-
-    thumb_id = upload_public(
-        thumb,
-        output_folder,
-        "image/jpeg"
-    )
-
-    shot_ids = [
-        upload_public(
-            p,
-            output_folder,
-            "image/jpeg"
-        )
-        for p in shots
-    ]
-
-
-    # ========================================================
-    # LABELS
-    # ========================================================
-
-    labels = list(
-        meta["labels"]
-    )
-
-    if not labels:
-
-        unc = next(
-            (
-                l
-                for l in site_labels
-                if l.lower()
-                == "uncategorized"
-            ),
-            None
-        )
-
-        labels = (
-            [unc]
-            if unc
-            else
-            [
-                g
-                for g in meta["genres"]
-            ][:2]
-            +
-            [meta["language"]]
-        )
-
-
-    labels = [
-        str(l)[:40]
-        for l in labels
-        if l
-    ][:8]
-
-
-    # ========================================================
-    # BUILD BLOGGER HTML
-    # ========================================================
-
-    content = build_html(
-        meta,
-        thumb_id,
-        shot_ids,
-        outputs,
-        fps,
-        dur
-    )
-
-
-    ytxt = (
-        f' ({meta["release_year"]})'
-        if meta["release_year"]
-        else ""
-    )
-
-    ltxt = (
-        f' {meta["language"]}'
-        if meta["language"].lower()
-        != "unknown"
-        else ""
-    )
-
-
-    body = {
-        "kind":
-            "blogger#post",
-
-        "title":
-            f'{meta["title"]}'
-            f'{ytxt}'
-            f'{ltxt}'
-            " Movie - Watch Online & Download",
-
-        "content":
-            content,
-
-        "labels":
-            labels
     }
 
 
-    # ========================================================
-    # BLOGGER POST
-    # ========================================================
+    function seekFromEvent(e) {
 
-    post = retry(
-        lambda:
-        blogger.posts().insert(
-            blogId=BLOG_ID,
-            body=body,
-            isDraft=not PUBLISH
-        ).execute()
-    )
+        var rect =
+            progressArea.getBoundingClientRect();
 
+        var x =
+            e.clientX - rect.left;
 
-    log(
-        "Blogger post created:",
-        post.get("url")
-        or post.get("id"),
-        "(DRAFT)"
-        if not PUBLISH
-        else "(PUBLISHED)"
-    )
+        var ratio =
+            x / rect.width;
 
+        ratio =
+            Math.max(
+                0,
+                Math.min(1, ratio)
+            );
 
-    # ========================================================
-    # MOVE ORIGINAL TO PROCESSED
-    # ========================================================
+        if (video.duration) {
 
-    drive.files().update(
-        fileId=video["id"],
-        addParents=processed_folder,
-        removeParents=INPUT_FOLDER,
-        fields="id"
-    ).execute()
+            video.currentTime =
+                ratio * video.duration;
+
+        }
+
+    }
 
 
-    # ========================================================
-    # CLEAN WORK DIRECTORY
-    # ========================================================
+    function setActiveQuality(q) {
 
-    shutil.rmtree(
-        job,
-        ignore_errors=True
-    )
+        var options =
+            settingsMenu.querySelectorAll(
+                '.mv-option[data-quality]'
+            );
 
+        for (
+            var i = 0;
+            i < options.length;
+            i++
+        ) {
 
-# ============================================================
-# MAIN
-# ============================================================
+            var item =
+                options[i];
 
-def main():
+            item.classList.toggle(
+                'active',
+                item.getAttribute('data-quality') === q
+            );
 
-    WORK.mkdir(
-        exist_ok=True
-    )
+        }
 
-    videos = list_videos()
-
-
-    if not videos:
-
-        log(
-            "No new videos in the input folder. "
-            "Nothing to do."
-        )
-
-        return 0
+    }
 
 
-    processed = ensure_folder(
-        "_processed"
-    )
+    function switchSource(url, quality) {
 
-    output = ensure_folder(
-        "_output"
-    )
+        if (!url) {
+            showError(true);
+            return;
+        }
 
-    failed = 0
+        var currentTime =
+            video.currentTime || 0;
+
+        var wasPlaying =
+            !video.paused;
+
+        showError(false);
+        showLoading(true);
+
+        currentQuality = quality;
+
+        setActiveQuality(quality);
+
+        if (hls) {
+
+            try {
+                hls.destroy();
+            } catch (e) {}
+
+            hls = null;
+
+        }
+
+        var isHls =
+            /\.m3u8($|\?)/i.test(url);
+
+        if (
+            isHls &&
+            window.Hls &&
+            Hls.isSupported()
+        ) {
+
+            hls = new Hls();
+
+            hls.loadSource(url);
+            hls.attachMedia(video);
+
+            hls.on(
+                Hls.Events.MANIFEST_PARSED,
+                function () {
+
+                    try {
+                        video.currentTime =
+                            currentTime;
+                    } catch (e) {}
+
+                    if (wasPlaying) {
+                        video.play().catch(
+                            function () {}
+                        );
+                    }
+
+                    showLoading(false);
+
+                }
+            );
+
+            hls.on(
+                Hls.Events.ERROR,
+                function () {
+                    showLoading(false);
+                }
+            );
+
+            return;
+        }
+
+        video.src = url;
+
+        video.addEventListener(
+            'loadedmetadata',
+            function restoreTimeOnce() {
+
+                video.removeEventListener(
+                    'loadedmetadata',
+                    restoreTimeOnce
+                );
+
+                try {
+
+                    if (
+                        currentTime > 0 &&
+                        isFinite(video.duration)
+                    ) {
+
+                        video.currentTime =
+                            Math.min(
+                                currentTime,
+                                Math.max(
+                                    0,
+                                    video.duration - 0.5
+                                )
+                            );
+
+                    }
+
+                } catch (e) {}
+
+                if (wasPlaying) {
+
+                    video.play().catch(
+                        function () {}
+                    );
+
+                }
+
+                showLoading(false);
+
+            }
+        );
+
+        video.load();
+
+    }
 
 
-    for v in videos[:MAX_VIDEOS]:
+    function chooseInitialSource() {
 
-        try:
+        var preferred = [
+            '720',
+            '1080',
+            '480',
+            '360'
+        ];
 
-            process(
-                v,
-                processed,
-                output
-            )
+        for (
+            var i = 0;
+            i < preferred.length;
+            i++
+        ) {
 
-        except Exception:
+            var q = preferred[i];
 
-            failed += 1
+            if (VIDEO_SOURCES[q]) {
 
-            traceback.print_exc()
+                return {
+                    quality: q,
+                    url: VIDEO_SOURCES[q]
+                };
+
+            }
+
+        }
+
+        if (VIDEO_SOURCES.hls) {
+
+            return {
+                quality: 'auto',
+                url: VIDEO_SOURCES.hls
+            };
+
+        }
+
+        return null;
+
+    }
 
 
-    return (
-        1
-        if failed
-        else 0
-    )
+    function setupQualityOptions() {
+
+        var options =
+            settingsMenu.querySelectorAll(
+                '.mv-option[data-quality]'
+            );
+
+        for (
+            var i = 0;
+            i < options.length;
+            i++
+        ) {
+
+            var item =
+                options[i];
+
+            var q =
+                item.getAttribute(
+                    'data-quality'
+                );
+
+            if (
+                q !== 'auto' &&
+                !VIDEO_SOURCES[q]
+            ) {
+
+                item.classList.add(
+                    'hidden-quality'
+                );
+
+            }
+
+        }
+
+    }
 
 
-# ============================================================
-# ENTRY
-# ============================================================
+    function setupLanguage() {
 
-if __name__ == "__main__":
+        var normalized =
+            String(DEFAULT_LANGUAGE || '')
+                .trim()
+                .toLowerCase();
 
-    sys.exit(
-        main()
-    )
+        if (!normalized) {
+            normalized = 'unknown';
+        }
+
+        languageLabel.innerHTML =
+            DEFAULT_LANGUAGE || 'Language';
+
+        var options =
+            settingsMenu.querySelectorAll(
+                '.mv-language-option'
+            );
+
+        for (
+            var i = 0;
+            i < options.length;
+            i++
+        ) {
+
+            var item = options[i];
+
+            var lang =
+                item.getAttribute(
+                    'data-language'
+                );
+
+            if (
+                lang.toLowerCase() ===
+                normalized
+            ) {
+
+                item.classList.add(
+                    'active'
+                );
+
+            } else {
+
+                item.classList.remove(
+                    'active'
+                );
+
+            }
+
+        }
+
+    }
+
+
+    function setSpeed(speed) {
+
+        var value =
+            parseFloat(speed);
+
+        if (!isFinite(value)) {
+            value = 1;
+        }
+
+        video.playbackRate = value;
+
+        var options =
+            settingsMenu.querySelectorAll(
+                '.mv-speed-option'
+            );
+
+        for (
+            var i = 0;
+            i < options.length;
+            i++
+        ) {
+
+            var item =
+                options[i];
+
+            item.classList.toggle(
+                'active',
+                parseFloat(
+                    item.getAttribute('data-speed')
+                ) === value
+            );
+
+        }
+
+    }
+
+
+    function toggleFullscreen() {
+
+        if (!document.fullscreenElement) {
+
+            if (player.requestFullscreen) {
+
+                player.requestFullscreen().catch(
+                    function () {}
+                );
+
+            } else if (
+                player.webkitRequestFullscreen
+            ) {
+
+                player.webkitRequestFullscreen();
+
+            }
+
+        } else {
+
+            if (document.exitFullscreen) {
+
+                document.exitFullscreen().catch(
+                    function () {}
+                );
+
+            } else if (
+                document.webkitExitFullscreen
+            ) {
+
+                document.webkitExitFullscreen();
+
+            }
+
+        }
+
+    }
+
+
+    centerPlay.addEventListener(
+        'click',
+        function () {
+
+            video.play().catch(
+                function () {}
+            );
+
+        }
+    );
+
+
+    playBtn.addEventListener(
+        'click',
+        function () {
+
+            if (video.paused) {
+
+                video.play().catch(
+                    function () {}
+                );
+
+            } else {
+
+                video.pause();
+
+            }
+
+        }
+    );
+
+
+    video.addEventListener(
+        'play',
+        updatePlayButton
+    );
+
+
+    video.addEventListener(
+        'pause',
+        updatePlayButton
+    );
+
+
+    video.addEventListener(
+        'timeupdate',
+        updateTime
+    );
+
+
+    video.add
