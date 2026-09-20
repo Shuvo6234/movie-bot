@@ -3,6 +3,7 @@ Movie Bot: Drive video -> multi-resolution -> screenshots + 9:16 thumbnail
 -> Gemini title/description/labels -> Blogger post (draft by default).
 Runs on GitHub Actions. All settings come from environment variables.
 """
+
 import html
 import json
 import os
@@ -14,7 +15,6 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
-from datetime import datetime
 from pathlib import Path
 
 from google import genai
@@ -37,17 +37,41 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 RESOLUTIONS = [
     int(x)
-    for x in os.environ.get("RESOLUTIONS", "480,720,1080").split(",")
+    for x in os.environ.get(
+        "RESOLUTIONS",
+        "480,720,1080"
+    ).split(",")
     if x.strip()
 ]
 
-MAX_VIDEOS = int(os.environ.get("MAX_VIDEOS", "1"))
-PUBLISH = os.environ.get("PUBLISH", "false").lower() == "true"
-LANGUAGE_HINT = os.environ.get("LANGUAGE_HINT", "").strip()
-AUDIO_MINUTES = int(os.environ.get("AUDIO_MINUTES", "10"))
-SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
-WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
-DIRECTOR_NAME = os.environ.get("DIRECTOR_NAME", "").strip()
+MAX_VIDEOS = int(
+    os.environ.get("MAX_VIDEOS", "1")
+)
+
+PUBLISH = (
+    os.environ.get("PUBLISH", "false").lower()
+    == "true"
+)
+
+LANGUAGE_HINT = os.environ.get(
+    "LANGUAGE_HINT", ""
+).strip()
+
+AUDIO_MINUTES = int(
+    os.environ.get("AUDIO_MINUTES", "10")
+)
+
+SCREENSHOTS = int(
+    os.environ.get("SCREENSHOTS", "6")
+)
+
+WAIT_SECONDS = int(
+    os.environ.get("WAIT_SECONDS", "20")
+)
+
+DIRECTOR_NAME = os.environ.get(
+    "DIRECTOR_NAME", ""
+).strip()
 
 CRF = {
     480: 24,
@@ -65,7 +89,6 @@ SCOPES = [
 ]
 
 
-# ---------- general helpers ----------
 def log(*a):
     print(*a, flush=True)
 
@@ -74,15 +97,22 @@ def retry(fn, tries=4):
     for i in range(tries):
         try:
             return fn()
-        except Exception as e:  # noqa
+        except Exception as e:
             if i == tries - 1:
                 raise
-            log(f"  retry {i + 1} after error: {e}")
+
+            log(
+                f"  retry {i + 1} after error: {e}"
+            )
+
             time.sleep(5 * (i + 1))
 
 
 def run(cmd):
-    subprocess.run(cmd, check=True)
+    subprocess.run(
+        cmd,
+        check=True
+    )
 
 
 # ---------- Google clients ----------
@@ -111,7 +141,9 @@ blogger = build(
     cache_discovery=False,
 )
 
-gclient = genai.Client(api_key=GEMINI_KEY)
+gclient = genai.Client(
+    api_key=GEMINI_KEY
+)
 
 
 # ---------- Drive helpers ----------
@@ -119,8 +151,8 @@ def ensure_folder(name):
     q = (
         f"'{INPUT_FOLDER}' in parents and "
         f"name='{name}' and "
-        "mimeType='application/vnd.google-apps.folder' and "
-        "trashed=false"
+        "mimeType='application/vnd.google-apps.folder' "
+        "and trashed=false"
     )
 
     res = drive.files().list(
@@ -160,7 +192,9 @@ def list_videos():
 
 
 def download(file_id, dest):
-    req = drive.files().get_media(fileId=file_id)
+    req = drive.files().get_media(
+        fileId=file_id
+    )
 
     with open(dest, "wb") as fh:
         dl = MediaIoBaseDownload(
@@ -172,7 +206,9 @@ def download(file_id, dest):
         done = False
 
         while not done:
-            status, done = retry(dl.next_chunk)
+            status, done = retry(
+                dl.next_chunk
+            )
 
             if status:
                 log(
@@ -201,7 +237,9 @@ def upload_public(path, parent, mime):
     resp = None
 
     while resp is None:
-        _, resp = retry(req.next_chunk)
+        _, resp = retry(
+            req.next_chunk
+        )
 
     fid = resp["id"]
 
@@ -223,39 +261,51 @@ def parse_fps(*vals):
     for v in vals:
         try:
             a, b = str(v).split("/")
+
             a = float(a)
             b = float(b)
 
             if b and a / b > 0:
                 return a / b
 
-        except Exception:  # noqa
+        except Exception:
             pass
 
     return 30.0
 
 
-# IMPORTANT:
-# 23.976 -> 24
-# 29.97  -> 30
-# 59.94  -> 60
 def fmt_fps(x):
-    return str(round(x))
+    """
+    Display FPS as a whole number.
+
+    23.976 -> 24
+    24     -> 24
+    29.97  -> 30
+    30     -> 30
+
+    This changes the displayed FPS text only.
+    It does NOT force the video itself to 24fps.
+    """
+    return str(
+        int(round(float(x)))
+    )
 
 
 def probe(path):
-    out = subprocess.check_output([
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height,avg_frame_rate,r_frame_rate:format=duration",
-        "-of",
-        "json",
-        path
-    ])
+    out = subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate,r_frame_rate:format=duration",
+            "-of",
+            "json",
+            path
+        ]
+    )
 
     d = json.loads(out)
 
@@ -278,29 +328,36 @@ def make_screenshots(src, dur, outdir):
     files = []
 
     for i in range(SCREENSHOTS):
-        t = dur * (i + 1) / (SCREENSHOTS + 1)
-
-        p = str(
-            outdir / f"shot_{i + 1}.jpg"
+        t = dur * (
+            i + 1
+        ) / (
+            SCREENSHOTS + 1
         )
 
-        run([
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{t:.2f}",
-            "-i",
-            src,
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=1280:-2",
-            "-q:v",
-            "3",
-            p
-        ])
+        p = str(
+            outdir /
+            f"shot_{i + 1}.jpg"
+        )
+
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{t:.2f}",
+                "-i",
+                src,
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1280:-2",
+                "-q:v",
+                "3",
+                p
+            ]
+        )
 
         files.append(p)
 
@@ -308,39 +365,43 @@ def make_screenshots(src, dur, outdir):
 
 
 def make_thumbnail(src, dur, w, h, outdir):
-    """
-    9:16 portrait thumbnail, 720x1280,
-    centre crop from a frame at 35%.
-    """
+    """9:16 portrait thumbnail, 720x1280, centre crop from a frame at 35%."""
 
     if w * 16 >= h * 9:
         ch = h // 2 * 2
-        cw = int(h * 9 / 16) // 2 * 2
+        cw = int(
+            h * 9 / 16
+        ) // 2 * 2
     else:
         cw = w // 2 * 2
-        ch = int(w * 16 / 9) // 2 * 2
+        ch = int(
+            w * 16 / 9
+        ) // 2 * 2
 
     p = str(
-        outdir / "thumb_9x16.jpg"
+        outdir /
+        "thumb_9x16.jpg"
     )
 
-    run([
-        "ffmpeg",
-        "-y",
-        "-loglevel",
-        "error",
-        "-ss",
-        f"{dur * 0.35:.2f}",
-        "-i",
-        src,
-        "-frames:v",
-        "1",
-        "-vf",
-        f"crop={cw}:{ch},scale=720:1280",
-        "-q:v",
-        "2",
-        p
-    ])
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{dur * 0.35:.2f}",
+            "-i",
+            src,
+            "-frames:v",
+            "1",
+            "-vf",
+            f"crop={cw}:{ch},scale=720:1280",
+            "-q:v",
+            "2",
+            p
+        ]
+    )
 
     return p
 
@@ -351,69 +412,81 @@ def analysis_inputs(src, dur, outdir):
     n = 12
 
     for i in range(n):
-        t = dur * (i + 1) / (n + 1)
+        t = dur * (
+            i + 1
+        ) / (
+            n + 1
+        )
 
         p = outdir / f"an_{i}.jpg"
 
-        run([
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{t:.2f}",
+                "-i",
+                src,
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=512:-2",
+                "-q:v",
+                "5",
+                str(p)
+            ]
+        )
+
+        frames.append(
+            p.read_bytes()
+        )
+
+    audio = (
+        outdir /
+        "an_audio.mp3"
+    )
+
+    start = dur * 0.10
+
+    run(
+        [
             "ffmpeg",
             "-y",
             "-loglevel",
             "error",
             "-ss",
-            f"{t:.2f}",
+            f"{start:.2f}",
+            "-t",
+            str(AUDIO_MINUTES * 60),
             "-i",
             src,
-            "-frames:v",
+            "-vn",
+            "-ac",
             "1",
-            "-vf",
-            "scale=512:-2",
-            "-q:v",
-            "5",
-            str(p)
-        ])
+            "-ar",
+            "16000",
+            "-b:a",
+            "32k",
+            str(audio)
+        ]
+    )
 
-        frames.append(p.read_bytes())
-
-    audio = outdir / "an_audio.mp3"
-
-    start = dur * 0.10
-
-    run([
-        "ffmpeg",
-        "-y",
-        "-loglevel",
-        "error",
-        "-ss",
-        f"{start:.2f}",
-        "-t",
-        str(AUDIO_MINUTES * 60),
-        "-i",
-        src,
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-b:a",
-        "32k",
-        str(audio)
-    ])
-
-    return frames, audio.read_bytes()
+    return (
+        frames,
+        audio.read_bytes()
+    )
 
 
 def transcode(src, target, w, h, out):
-    """
-    target = length of the SHORT side (480/720/1080):
-    works for landscape and vertical.
+    """target = length of the SHORT side (480/720/1080)."""
 
-    NOTE:
-    No -r option is used here.
-    Therefore the source FPS is not forcefully changed.
-    """
-
-    crf = CRF.get(target, 23)
+    crf = CRF.get(
+        target,
+        23
+    )
 
     vf = (
         f"scale=-2:{target}"
@@ -421,36 +494,38 @@ def transcode(src, target, w, h, out):
         else f"scale={target}:-2"
     )
 
-    run([
-        "ffmpeg",
-        "-y",
-        "-loglevel",
-        "error",
-        "-stats",
-        "-i",
-        src,
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a?",
-        "-vf",
-        vf,
-        "-pix_fmt",
-        "yuv420p",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        str(crf),
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        out
-    ])
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-stats",
+            "-i",
+            src,
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-vf",
+            vf,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            str(crf),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            out
+        ]
+    )
 
 
 # ---------- menu labels ----------
@@ -494,20 +569,24 @@ def parse_labels(page):
     seen = set()
 
     for f in found:
-        name = urllib.parse.unquote_plus(f).strip()
+        name = urllib.parse.unquote_plus(
+            f
+        ).strip()
 
-        if name and name.lower() not in seen:
-            seen.add(name.lower())
+        if (
+            name
+            and name.lower() not in seen
+        ):
+            seen.add(
+                name.lower()
+            )
             labels.append(name)
 
     return labels
 
 
 def get_site_labels():
-    """
-    Read the real label names from the blog's menu,
-    fall back to a built-in list.
-    """
+    """Read real labels from the blog menu."""
 
     labels = []
 
@@ -519,7 +598,8 @@ def get_site_labels():
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0"
+                "User-Agent":
+                    "Mozilla/5.0"
             }
         )
 
@@ -531,13 +611,16 @@ def get_site_labels():
             "ignore"
         )
 
-        labels = parse_labels(page)
-
-        log(
-            f"  Found {len(labels)} labels on the blog"
+        labels = parse_labels(
+            page
         )
 
-    except Exception as e:  # noqa
+        log(
+            f"  Found {len(labels)} "
+            "labels on the blog"
+        )
+
+    except Exception as e:
         log(
             "  Could not read blog labels:",
             e
@@ -608,15 +691,17 @@ YEAR_RE = re.compile(
 
 
 def find_year(filename):
-    """
-    Release year only if the file name contains one.
-    """
+    """Release year from filename if available."""
 
     m = YEAR_RE.search(
         Path(filename).stem
     )
 
-    return int(m.group(1)) if m else None
+    return (
+        int(m.group(1))
+        if m
+        else None
+    )
 
 
 def clean_hint(filename):
@@ -650,10 +735,16 @@ def clean_hint(filename):
     no_year = re.sub(
         r"\s+",
         " ",
-        YEAR_RE.sub(" ", t)
+        YEAR_RE.sub(
+            " ",
+            t
+        )
     ).strip()
 
-    return no_year or t
+    return (
+        no_year
+        or t
+    )
 
 
 def analyze(
@@ -662,9 +753,13 @@ def analyze(
     audio_bytes,
     site_labels
 ):
-    hint = clean_hint(filename_hint)
+    hint = clean_hint(
+        filename_hint
+    )
 
-    year = find_year(filename_hint)
+    year = find_year(
+        filename_hint
+    )
 
     prompt = f"""You are a film writer. You are publishing an ORIGINAL film, on its own director's film
 blog. You get 12 frames spread across the film and an audio sample.
@@ -697,8 +792,7 @@ Return ONLY JSON with these keys:
   labels: pick 1-4 categories that best fit this film, ONLY from this exact list
           (copy the spelling exactly): {json.dumps(site_labels)}.
           Judge by language spoken, film industry/country, and type (movie, web series,
-          trailer, song, etc.). Ignore labels about video encoding or file format.
-"""
+          trailer, song, etc.). Ignore labels about video encoding or file format."""
 
     parts = [
         types.Part.from_bytes(
@@ -717,10 +811,12 @@ Return ONLY JSON with these keys:
 
     data = {}
 
-    for model in dict.fromkeys([
-        GEMINI_MODEL,
-        "gemini-flash-latest"
-    ]):
+    for model in dict.fromkeys(
+        [
+            GEMINI_MODEL,
+            "gemini-flash-latest"
+        ]
+    ):
         try:
             resp = retry(
                 lambda: gclient.models.generate_content(
@@ -751,40 +847,47 @@ Return ONLY JSON with these keys:
 
             break
 
-        except Exception as e:  # noqa
+        except Exception as e:
             log(
-                f"  Gemini model {model} failed: {e}"
+                f"  Gemini model "
+                f"{model} failed: {e}"
             )
 
     if not data:
-        log("  Using fallback text.")
+        log(
+            "  Using fallback text."
+        )
 
     faq = [
         f
-        for f in (data.get("faq") or [])
+        for f in (
+            data.get("faq")
+            or []
+        )
         if isinstance(f, dict)
         and f.get("q")
         and f.get("a")
     ]
 
     return {
-        "title": data.get("title")
-        or hint
-        or "Untitled Film",
-
-        "tagline": data.get("tagline")
-        or "",
-
-        "synopsis": as_paragraphs(
-            data.get("synopsis")
-        ) or [
-            "An original film."
-        ],
-
+        "title": (
+            data.get("title")
+            or hint
+            or "Untitled Film"
+        ),
+        "tagline": (
+            data.get("tagline")
+            or ""
+        ),
+        "synopsis": (
+            as_paragraphs(
+                data.get("synopsis")
+            )
+            or ["An original film."]
+        ),
         "review": as_paragraphs(
             data.get("review")
         ),
-
         "themes": [
             str(t)
             for t in (
@@ -792,25 +895,25 @@ Return ONLY JSON with these keys:
                 or []
             )
         ][:5],
-
         "faq": faq[:4],
-
-        "genres": data.get("genres")
-        or ["Drama"],
-
-        "language": data.get("language")
-        or LANGUAGE_HINT
-        or "Unknown",
-
+        "genres": (
+            data.get("genres")
+            or ["Drama"]
+        ),
+        "language": (
+            data.get("language")
+            or LANGUAGE_HINT
+            or "Unknown"
+        ),
         "release_year": year,
-
-        "content_rating": data.get(
-            "content_rating"
-        ) or "General audience",
-
-        "tags": data.get("tags")
-        or [],
-
+        "content_rating": (
+            data.get("content_rating")
+            or "General audience"
+        ),
+        "tags": (
+            data.get("tags")
+            or []
+        ),
         "labels": pick_labels(
             data.get("labels"),
             site_labels
@@ -818,14 +921,18 @@ Return ONLY JSON with these keys:
     }
 
 
-# ---------- post HTML ----------
+# ---------- post helpers ----------
 def human(n):
     n = float(n)
 
     if n >= 1024 ** 3:
-        return f"{n / 1024 ** 3:.1f}GB"
+        return (
+            f"{n / 1024 ** 3:.1f}GB"
+        )
 
-    return f"{n / 1024 ** 2:.0f}MB"
+    return (
+        f"{n / 1024 ** 2:.0f}MB"
+    )
 
 
 def fmt_runtime(sec):
@@ -839,1321 +946,1625 @@ def fmt_runtime(sec):
     if m < 60:
         return f"{m} min"
 
-    return f"{m // 60} h {m % 60} min"
+    return (
+        f"{m // 60} h "
+        f"{m % 60} min"
+    )
 
 
 def img_url(fid):
-    return f"https://lh3.googleusercontent.com/d/{fid}"
+    return (
+        f"https://lh3.googleusercontent.com/d/{fid}"
+    )
 
 
 # ---------- download timer ----------
 TIMER_SCRIPT = """<script>
 (function () {
   var WAIT = %d;
-  var btns = document.querySelectorAll('a.mv-dl[data-fid]');
+
+  var btns =
+    document.querySelectorAll(
+      'a.mv-dl[data-fid]'
+    );
 
   for (var i = 0; i < btns.length; i++) {
     (function (b) {
+
       var label = b.innerHTML;
       var busy = false;
 
-      b.addEventListener('click', function (e) {
-        e.preventDefault();
+      b.addEventListener(
+        'click',
+        function (e) {
 
-        if (busy) {
-          return;
-        }
+          e.preventDefault();
 
-        busy = true;
-
-        var left = WAIT;
-
-        b.style.opacity = '0.85';
-        b.innerHTML =
-          'Please wait ' + left + ' seconds...';
-
-        var t = setInterval(function () {
-          left--;
-
-          if (left > 0) {
-            b.innerHTML =
-              'Please wait ' + left + ' seconds...';
-
+          if (busy) {
             return;
           }
 
-          clearInterval(t);
+          busy = true;
+
+          var left = WAIT;
+
+          b.style.opacity = '0.85';
 
           b.innerHTML =
-            'Download starting...';
+            'Please wait ' +
+            left +
+            ' seconds...';
 
-          window.location.href =
-            'https://drive.usercontent.google.com/download?id=' +
-            b.getAttribute('data-fid') +
-            '&export=download&confirm=t';
+          var t = setInterval(
+            function () {
 
-          setTimeout(function () {
-            b.innerHTML = label;
-            b.style.opacity = '1';
-            busy = false;
-          }, 6000);
+              left--;
 
-        }, 1000);
-      });
+              if (left > 0) {
+                b.innerHTML =
+                  'Please wait ' +
+                  left +
+                  ' seconds...';
+
+                return;
+              }
+
+              clearInterval(t);
+
+              b.innerHTML =
+                'Download starting...';
+
+              window.location.href =
+                'https://drive.usercontent.google.com/download?id=' +
+                b.getAttribute('data-fid') +
+                '&export=download&confirm=t';
+
+              setTimeout(
+                function () {
+                  b.innerHTML = label;
+                  b.style.opacity = '1';
+                  busy = false;
+                },
+                6000
+              );
+
+            },
+            1000
+          );
+
+        }
+      );
 
     })(btns[i]);
   }
+
 })();
 </script>""" % WAIT_SECONDS
 
 
-# ==========================================================
-# CUSTOM VIDEO PLAYER
-# ==========================================================
+# ============================================================
+# CUSTOM PLAYER
 #
 # IMPORTANT:
-# This is deliberately a NORMAL triple-quoted string.
-# It is NOT an f-string.
-#
-# Therefore JavaScript { } and CSS { } cannot cause:
-# SyntaxError: f-string: single '}' is not allowed
-#
-# Python values are inserted later using .replace().
-# ==========================================================
+# DO NOT change this to an f-string.
+# This is the fix for:
+# SyntaxError: single '}' is not allowed
+# ============================================================
 
-PLAYER_TEMPLATE = r"""
-<style>
-.mv-player-wrap {
-    width: 100%;
-    max-width: 100%;
-    margin: 18px auto 28px;
-    box-sizing: border-box;
+PLAYER_TEMPLATE = r'''<style>
+
+.mv-player{
+  --mv-green:#39ff72;
+  --mv-panel:rgba(10,14,16,.96);
+
+  position:relative;
+  width:100%;
+  max-width:1100px;
+  margin:20px auto;
+
+  background:#000;
+  overflow:hidden;
+  border-radius:10px;
+
+  box-shadow:
+    0 12px 35px rgba(0,0,0,.55);
+
+  aspect-ratio:16/9;
+
+  font-family:
+    Arial,
+    Helvetica,
+    sans-serif;
+
+  color:#fff;
 }
 
-.mv-player {
-    position: relative;
-    width: 100%;
-    aspect-ratio: 16 / 9;
-    background: #000;
-    overflow: hidden;
-    border-radius: 4px;
-    font-family: Arial, Helvetica, sans-serif;
-    user-select: none;
-    -webkit-user-select: none;
-    box-sizing: border-box;
+.mv-player *{
+  box-sizing:border-box;
 }
 
-.mv-player *,
-.mv-player *::before,
-.mv-player *::after {
-    box-sizing: border-box;
+.mv-player video{
+  position:absolute;
+
+  inset:0;
+
+  width:100%;
+  height:100%;
+
+  background:#000;
+
+  object-fit:contain;
 }
 
-.mv-player video {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    display: block;
-    background: #000;
-    object-fit: contain;
+.mv-player .mv-language{
+  position:absolute;
+
+  z-index:5;
+
+  top:15px;
+  left:15px;
+
+  padding:6px 11px;
+
+  border-radius:6px;
+
+  background:rgba(0,0,0,.72);
+
+  color:var(--mv-green);
+
+  font-size:13px;
+  font-weight:800;
+
+  line-height:1;
+
+  pointer-events:none;
 }
 
-.mv-player .mv-language {
-    position: absolute;
-    left: 14px;
-    top: 12px;
-    z-index: 8;
-    padding: 5px 9px;
-    border-radius: 5px;
-    background: rgba(0, 0, 0, .58);
-    color: #7dff43;
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 1;
-    pointer-events: none;
+.mv-player .mv-center-play{
+  position:absolute;
+
+  z-index:7;
+
+  left:50%;
+  top:50%;
+
+  transform:
+    translate(-50%,-50%);
+
+  width:72px;
+  height:72px;
+
+  border:0;
+
+  border-radius:50%;
+
+  background:
+    var(--mv-green);
+
+  color:#000;
+
+  display:flex;
+
+  align-items:center;
+  justify-content:center;
+
+  cursor:pointer;
+
+  font-size:28px;
+
+  font-weight:900;
+
+  box-shadow:
+    0 6px 25px rgba(0,0,0,.5);
 }
 
-.mv-player .mv-center-play {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    z-index: 7;
-    transform: translate(-50%, -50%);
-    width: 70px;
-    height: 70px;
-    border: 0;
-    border-radius: 50%;
-    background: rgba(70, 184, 42, .96);
-    color: #fff;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 29px;
-    padding-left: 5px;
-    box-shadow: 0 3px 18px rgba(0,0,0,.38);
+.mv-player .mv-center-play:hover{
+  transform:
+    translate(-50%,-50%)
+    scale(1.05);
 }
 
-.mv-player .mv-center-play:hover {
-    background: rgba(87, 205, 50, 1);
-}
+.mv-player .mv-controls{
+  position:absolute;
 
-.mv-player .mv-controls {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 10;
-    padding: 0 13px 10px;
-    background: linear-gradient(
-        to top,
-        rgba(0,0,0,.88),
-        rgba(0,0,0,.38),
-        transparent
+  z-index:8;
+
+  left:0;
+  right:0;
+  bottom:0;
+
+  padding:
+    40px 14px 12px;
+
+  background:
+    linear-gradient(
+      to top,
+      rgba(0,0,0,.94),
+      rgba(0,0,0,.45),
+      transparent
     );
-    opacity: 1;
-    transition: opacity .2s ease;
+
+  opacity:1;
+
+  transition:
+    opacity .2s ease;
 }
 
-.mv-player .mv-progress-area {
-    position: relative;
-    height: 18px;
-    padding-top: 8px;
-    cursor: pointer;
+.mv-player .mv-progress-wrap{
+  position:relative;
+
+  width:100%;
+
+  height:5px;
+
+  margin-bottom:10px;
+
+  cursor:pointer;
 }
 
-.mv-player .mv-progress-bg {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 8px;
-    height: 4px;
-    border-radius: 5px;
-    background: rgba(255,255,255,.25);
+.mv-player .mv-progress-bg,
+.mv-player .mv-buffer,
+.mv-player .mv-progress{
+  position:absolute;
+
+  left:0;
+  top:0;
+
+  height:100%;
+
+  border-radius:10px;
 }
 
-.mv-player .mv-buffer {
-    position: absolute;
-    left: 0;
-    top: 8px;
-    height: 4px;
-    width: 0;
-    border-radius: 5px;
-    background: rgba(255,255,255,.42);
-    pointer-events: none;
+.mv-player .mv-progress-bg{
+  width:100%;
+
+  background:
+    rgba(255,255,255,.22);
 }
 
-.mv-player .mv-progress {
-    position: absolute;
-    left: 0;
-    top: 8px;
-    height: 4px;
-    width: 0;
-    border-radius: 5px;
-    background: #58c62d;
-    pointer-events: none;
+.mv-player .mv-buffer{
+  width:0;
+
+  background:
+    rgba(255,255,255,.35);
 }
 
-.mv-player .mv-handle {
-    position: absolute;
-    top: 5px;
-    left: 0;
-    width: 10px;
-    height: 10px;
-    margin-left: -5px;
-    border-radius: 50%;
-    background: #65d637;
-    box-shadow: 0 0 0 2px rgba(0,0,0,.15);
-    pointer-events: none;
+.mv-player .mv-progress{
+  width:0;
+
+  background:
+    var(--mv-green);
 }
 
-.mv-player .mv-bottom {
-    min-height: 38px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
+.mv-player .mv-progress-handle{
+  position:absolute;
+
+  top:50%;
+  left:0;
+
+  width:13px;
+  height:13px;
+
+  border-radius:50%;
+
+  background:
+    var(--mv-green);
+
+  transform:
+    translate(-50%,-50%);
+
+  box-shadow:
+    0 0 7px
+    rgba(57,255,114,.8);
 }
 
-.mv-player button {
-    border: 0;
-    outline: 0;
+.mv-player .mv-row{
+  display:flex;
+
+  align-items:center;
+
+  gap:10px;
+
+  min-width:0;
 }
 
-.mv-player .mv-btn {
-    width: 30px;
-    height: 30px;
-    padding: 0;
-    background: transparent;
-    color: #fff;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    flex: 0 0 auto;
+.mv-player .mv-btn{
+  width:34px;
+  height:34px;
+
+  padding:0;
+
+  border:0;
+
+  background:transparent;
+
+  color:#fff;
+
+  cursor:pointer;
+
+  border-radius:5px;
+
+  display:flex;
+
+  align-items:center;
+  justify-content:center;
+
+  font-size:18px;
+
+  flex:0 0 auto;
 }
 
-.mv-player .mv-btn:hover {
-    color: #75df45;
+.mv-player .mv-btn:hover{
+  background:
+    rgba(255,255,255,.12);
 }
 
-.mv-player .mv-time {
-    color: #fff;
-    font-size: 12px;
-    white-space: nowrap;
-    line-height: 30px;
+.mv-player .mv-time{
+  min-width:90px;
+
+  font-size:13px;
+
+  color:#fff;
+
+  user-select:none;
+
+  white-space:nowrap;
 }
 
-.mv-player .mv-volume-wrap {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    min-width: 0;
+.mv-player .mv-spacer{
+  flex:1;
 }
 
-.mv-player .mv-volume {
-    width: 70px;
-    height: 4px;
-    cursor: pointer;
-    accent-color: #62cc37;
+.mv-player .mv-volume{
+  width:75px;
+
+  accent-color:
+    var(--mv-green);
 }
 
-.mv-player .mv-spacer {
-    flex: 1;
+.mv-player .mv-settings{
+  position:relative;
 }
 
-.mv-player .mv-settings {
-    position: relative;
+.mv-player .mv-menu{
+  display:none;
+
+  position:absolute;
+
+  right:0;
+  bottom:45px;
+
+  width:230px;
+
+  max-width:
+    calc(100vw - 30px);
+
+  background:
+    var(--mv-panel);
+
+  border:
+    1px solid
+    rgba(255,255,255,.12);
+
+  border-radius:8px;
+
+  padding:10px;
+
+  box-shadow:
+    0 10px 35px
+    rgba(0,0,0,.65);
+
+  z-index:20;
 }
 
-.mv-player .mv-menu {
-    position: absolute;
-    right: 0;
-    bottom: 42px;
-    width: 185px;
-    max-height: 330px;
-    overflow-y: auto;
-    padding: 8px 0;
-    border-radius: 7px;
-    background: rgba(18,18,18,.98);
-    box-shadow: 0 6px 28px rgba(0,0,0,.55);
-    display: none;
-    color: #fff;
+.mv-player .mv-menu.show{
+  display:block;
 }
 
-.mv-player .mv-menu.open {
-    display: block;
+.mv-player .mv-menu-title{
+  padding:6px 8px;
+
+  color:#aaa;
+
+  font-size:11px;
+
+  font-weight:800;
+
+  text-transform:uppercase;
+
+  letter-spacing:.08em;
 }
 
-.mv-player .mv-menu-title {
-    padding: 7px 13px 5px;
-    color: #9c9c9c;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
+.mv-player .mv-option{
+  display:flex;
+
+  align-items:center;
+  justify-content:space-between;
+
+  width:100%;
+
+  padding:9px 8px;
+
+  border:0;
+
+  border-radius:5px;
+
+  background:transparent;
+
+  color:#fff;
+
+  text-align:left;
+
+  cursor:pointer;
+
+  font-size:13px;
 }
 
-.mv-player .mv-option {
-    display: block;
-    width: 100%;
-    padding: 9px 13px;
-    text-align: left;
-    color: #fff;
-    background: transparent;
-    border: 0;
-    cursor: pointer;
-    font-size: 13px;
+.mv-player .mv-option:hover{
+  background:
+    rgba(255,255,255,.09);
 }
 
-.mv-player .mv-option:hover {
-    background: rgba(255,255,255,.09);
+.mv-player .mv-option.active{
+  color:
+    var(--mv-green);
+
+  font-weight:800;
 }
 
-.mv-player .mv-option.active {
-    color: #68d63c;
+.mv-player .mv-submenu{
+  border-top:
+    1px solid
+    rgba(255,255,255,.08);
+
+  margin-top:6px;
+
+  padding-top:6px;
 }
 
-.mv-player .mv-option.hidden-quality {
-    display: none;
+.mv-player .mv-error{
+  position:absolute;
+
+  z-index:9;
+
+  left:50%;
+  top:20%;
+
+  transform:
+    translateX(-50%);
+
+  width:90%;
+
+  text-align:center;
+
+  display:none;
+
+  padding:10px 14px;
+
+  border-radius:6px;
+
+  background:
+    rgba(150,0,0,.8);
+
+  color:#fff;
+
+  font-size:13px;
 }
 
-.mv-player .mv-loading {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    z-index: 6;
-    transform: translate(-50%, -50%);
-    width: 42px;
-    height: 42px;
-    border: 4px solid rgba(255,255,255,.25);
-    border-top-color: #62d83b;
-    border-radius: 50%;
-    animation: mvspin .8s linear infinite;
-    display: none;
+@media(max-width:600px){
+
+  .mv-player{
+    border-radius:6px;
+  }
+
+  .mv-player .mv-controls{
+    padding-left:8px;
+    padding-right:8px;
+  }
+
+  .mv-player .mv-time{
+    min-width:74px;
+    font-size:11px;
+  }
+
+  .mv-player .mv-volume{
+    width:52px;
+  }
+
+  .mv-player .mv-center-play{
+    width:62px;
+    height:62px;
+  }
+
+  .mv-player .mv-language{
+    top:9px;
+    left:9px;
+    font-size:11px;
+  }
+
 }
 
-.mv-player .mv-error {
-    position: absolute;
-    left: 50%;
-    top: 58%;
-    z-index: 9;
-    transform: translate(-50%, -50%);
-    width: 90%;
-    text-align: center;
-    color: #fff;
-    font-size: 13px;
-    background: rgba(0,0,0,.65);
-    padding: 8px 12px;
-    border-radius: 5px;
-    display: none;
-}
-
-@keyframes mvspin {
-    from {
-        transform: translate(-50%, -50%) rotate(0deg);
-    }
-
-    to {
-        transform: translate(-50%, -50%) rotate(360deg);
-    }
-}
-
-@media (max-width: 520px) {
-    .mv-player .mv-bottom {
-        gap: 5px;
-    }
-
-    .mv-player .mv-volume {
-        width: 50px;
-    }
-
-    .mv-player .mv-time {
-        font-size: 11px;
-    }
-
-    .mv-player .mv-btn {
-        width: 27px;
-        font-size: 16px;
-    }
-
-    .mv-player .mv-center-play {
-        width: 60px;
-        height: 60px;
-        font-size: 25px;
-    }
-
-    .mv-player .mv-language {
-        left: 9px;
-        top: 8px;
-        font-size: 11px;
-    }
-}
 </style>
 
-<div class="mv-player-wrap">
-    <div class="mv-player" id="mvPlayerUnique">
 
-        <video
-            id="mvVideoUnique"
-            playsinline
-            preload="metadata"
-            controlslist="nodownload"
-        ></video>
+<div class="mv-player" id="mvPlayer">
 
-        <div
-            class="mv-language"
-            id="mvLanguageUnique"
-        >__PLAYER_LANGUAGE__</div>
+  <video
+    id="mvVideo"
+    playsinline
+    preload="metadata">
+  </video>
+
+
+  <div
+    class="mv-language"
+    id="mvLanguage">
+    __PLAYER_LANGUAGE__
+  </div>
+
+
+  <div
+    class="mv-error"
+    id="mvError">
+
+    Video could not be loaded.
+    Please try another quality.
+
+  </div>
+
+
+  <button
+    class="mv-center-play"
+    id="mvCenterPlay"
+    type="button"
+    aria-label="Play">
+
+    ▶
+
+  </button>
+
+
+  <div
+    class="mv-controls"
+    id="mvControls">
+
+
+    <div
+      class="mv-progress-wrap"
+      id="mvProgressWrap">
+
+      <div
+        class="mv-progress-bg">
+      </div>
+
+      <div
+        class="mv-buffer"
+        id="mvBuffer">
+      </div>
+
+      <div
+        class="mv-progress"
+        id="mvProgress">
+      </div>
+
+      <div
+        class="mv-progress-handle"
+        id="mvHandle">
+      </div>
+
+    </div>
+
+
+    <div class="mv-row">
+
+
+      <button
+        class="mv-btn"
+        id="mvPlay"
+        type="button"
+        aria-label="Play/Pause">
+
+        ▶
+
+      </button>
+
+
+      <div
+        class="mv-time"
+        id="mvTime">
+
+        00:00 / 00:00
+
+      </div>
+
+
+      <button
+        class="mv-btn"
+        id="mvMute"
+        type="button"
+        aria-label="Mute">
+
+        🔊
+
+      </button>
+
+
+      <input
+        class="mv-volume"
+        id="mvVolume"
+        type="range"
+        min="0"
+        max="1"
+        step="0.05"
+        value="1"
+        aria-label="Volume">
+
+
+      <div class="mv-spacer">
+      </div>
+
+
+      <div class="mv-settings">
+
 
         <button
-            class="mv-center-play"
-            id="mvCenterPlayUnique"
+          class="mv-btn"
+          id="mvSettings"
+          type="button"
+          aria-label="Settings">
+
+          ⚙
+
+        </button>
+
+
+        <div
+          class="mv-menu"
+          id="mvMenu">
+
+
+          <div class="mv-menu-title">
+            Quality
+          </div>
+
+
+          <button
+            class="mv-option"
             type="button"
-            aria-label="Play"
-        >▶</button>
+            data-quality="auto">
 
-        <div
-            class="mv-loading"
-            id="mvLoadingUnique"
-        ></div>
+            Auto
 
-        <div
-            class="mv-error"
-            id="mvErrorUnique"
-        >Unable to load this video.</div>
+            <span
+              class="mv-check">
+            </span>
 
-        <div class="mv-controls">
+          </button>
 
-            <div
-                class="mv-progress-area"
-                id="mvProgressAreaUnique"
-            >
-                <div class="mv-progress-bg"></div>
 
-                <div
-                    class="mv-buffer"
-                    id="mvBufferUnique"
-                ></div>
+          <button
+            class="mv-option"
+            type="button"
+            data-quality="1080">
 
-                <div
-                    class="mv-progress"
-                    id="mvProgressUnique"
-                ></div>
+            1080p
 
-                <div
-                    class="mv-handle"
-                    id="mvHandleUnique"
-                ></div>
+            <span
+              class="mv-check">
+            </span>
+
+          </button>
+
+
+          <button
+            class="mv-option"
+            type="button"
+            data-quality="720">
+
+            720p
+
+            <span
+              class="mv-check">
+            </span>
+
+          </button>
+
+
+          <button
+            class="mv-option"
+            type="button"
+            data-quality="480">
+
+            480p
+
+            <span
+              class="mv-check">
+            </span>
+
+          </button>
+
+
+          <button
+            class="mv-option"
+            type="button"
+            data-quality="360">
+
+            360p
+
+            <span
+              class="mv-check">
+            </span>
+
+          </button>
+
+
+          <div class="mv-submenu">
+
+
+            <div class="mv-menu-title">
+              Language
             </div>
 
-            <div class="mv-bottom">
 
-                <button
-                    class="mv-btn"
-                    id="mvPlayUnique"
-                    type="button"
-                    aria-label="Play/Pause"
-                >▶</button>
+            <button
+              class="mv-option mv-language-option"
+              type="button"
+              data-language="Hindi">
 
-                <div
-                    class="mv-time"
-                    id="mvTimeUnique"
-                >00:00 / 00:00</div>
+              Hindi
 
-                <div class="mv-volume-wrap">
+            </button>
 
-                    <button
-                        class="mv-btn"
-                        id="mvMuteUnique"
-                        type="button"
-                        aria-label="Mute"
-                    >🔊</button>
 
-                    <input
-                        class="mv-volume"
-                        id="mvVolumeUnique"
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value="1"
-                        aria-label="Volume"
-                    >
+            <button
+              class="mv-option mv-language-option"
+              type="button"
+              data-language="English">
 
-                </div>
+              English
 
-                <div class="mv-spacer"></div>
+            </button>
 
-                <div class="mv-settings">
 
-                    <button
-                        class="mv-btn"
-                        id="mvSettingsBtnUnique"
-                        type="button"
-                        aria-label="Settings"
-                    >⚙</button>
+            <button
+              class="mv-option mv-language-option"
+              type="button"
+              data-language="Bengali">
 
-                    <div
-                        class="mv-menu"
-                        id="mvSettingsMenuUnique"
-                    >
+              Bengali
 
-                        <div class="mv-menu-title">
-                            Quality
-                        </div>
+            </button>
 
-                        <button
-                            class="mv-option"
-                            data-quality="auto"
-                            type="button"
-                        >Auto</button>
 
-                        <button
-                            class="mv-option"
-                            data-quality="1080"
-                            type="button"
-                        >1080p</button>
+            <button
+              class="mv-option mv-language-option"
+              type="button"
+              data-language="Arabic">
 
-                        <button
-                            class="mv-option"
-                            data-quality="720"
-                            type="button"
-                        >720p</button>
+              Arabic
 
-                        <button
-                            class="mv-option"
-                            data-quality="480"
-                            type="button"
-                        >480p</button>
+            </button>
 
-                        <button
-                            class="mv-option"
-                            data-quality="360"
-                            type="button"
-                        >360p</button>
 
-                        <div class="mv-menu-title">
-                            Language
-                        </div>
+          </div>
 
-                        <button
-                            class="mv-option mv-language-option"
-                            data-language="Hindi"
-                            type="button"
-                        >Hindi</button>
 
-                        <button
-                            class="mv-option mv-language-option"
-                            data-language="English"
-                            type="button"
-                        >English</button>
+          <div class="mv-submenu">
 
-                        <button
-                            class="mv-option mv-language-option"
-                            data-language="Bengali"
-                            type="button"
-                        >Bengali</button>
 
-                        <button
-                            class="mv-option mv-language-option"
-                            data-language="Arabic"
-                            type="button"
-                        >Arabic</button>
-
-                        <div class="mv-menu-title">
-                            Speed
-                        </div>
-
-                        <button
-                            class="mv-option mv-speed-option"
-                            data-speed="0.5"
-                            type="button"
-                        >0.5x</button>
-
-                        <button
-                            class="mv-option mv-speed-option"
-                            data-speed="0.75"
-                            type="button"
-                        >0.75x</button>
-
-                        <button
-                            class="mv-option mv-speed-option active"
-                            data-speed="1"
-                            type="button"
-                        >1x</button>
-
-                        <button
-                            class="mv-option mv-speed-option"
-                            data-speed="1.25"
-                            type="button"
-                        >1.25x</button>
-
-                        <button
-                            class="mv-option mv-speed-option"
-                            data-speed="1.5"
-                            type="button"
-                        >1.5x</button>
-
-                        <button
-                            class="mv-option mv-speed-option"
-                            data-speed="2"
-                            type="button"
-                        >2x</button>
-
-                        <div class="mv-menu-title">
-                            Screen
-                        </div>
-
-                        <button
-                            class="mv-option"
-                            id="mvFullscreenMenuUnique"
-                            type="button"
-                        >Fullscreen</button>
-
-                    </div>
-                </div>
-
-                <button
-                    class="mv-btn"
-                    id="mvFullscreenUnique"
-                    type="button"
-                    aria-label="Fullscreen"
-                >⛶</button>
-
+            <div class="mv-menu-title">
+              Speed
             </div>
+
+
+            <button
+              class="mv-option mv-speed-option"
+              type="button"
+              data-speed="0.5">
+
+              0.5x
+
+            </button>
+
+
+            <button
+              class="mv-option mv-speed-option"
+              type="button"
+              data-speed="0.75">
+
+              0.75x
+
+            </button>
+
+
+            <button
+              class="mv-option mv-speed-option active"
+              type="button"
+              data-speed="1">
+
+              1x
+
+            </button>
+
+
+            <button
+              class="mv-option mv-speed-option"
+              type="button"
+              data-speed="1.25">
+
+              1.25x
+
+            </button>
+
+
+            <button
+              class="mv-option mv-speed-option"
+              type="button"
+              data-speed="1.5">
+
+              1.5x
+
+            </button>
+
+
+            <button
+              class="mv-option mv-speed-option"
+              type="button"
+              data-speed="2">
+
+              2x
+
+            </button>
+
+
+          </div>
+
+
+          <div class="mv-submenu">
+
+
+            <button
+              class="mv-option"
+              id="mvFullscreenMenu"
+              type="button">
+
+              Fullscreen
+
+            </button>
+
+
+          </div>
+
+
         </div>
+
+      </div>
+
+
+      <button
+        class="mv-btn"
+        id="mvFullscreen"
+        type="button"
+        aria-label="Fullscreen">
+
+        ⛶
+
+      </button>
+
+
     </div>
+
+  </div>
+
 </div>
 
+
 <script src="https://cdn.jsdelivr.net/npm/hls.js@0.14.17"></script>
+
 
 <script>
 (function () {
 
-    var VIDEO_SOURCES = __VIDEO_SOURCES__;
+  'use strict';
 
-    var DEFAULT_LANGUAGE = __PLAYER_LANGUAGE_JSON__;
 
-    var video = document.getElementById(
-        'mvVideoUnique'
+  var VIDEO_SOURCES =
+    __SOURCES_JSON__;
+
+
+  var DEFAULT_LANGUAGE =
+    __PLAYER_LANGUAGE_JSON__;
+
+
+  var player =
+    document.getElementById(
+      'mvPlayer'
     );
 
-    var player = document.getElementById(
-        'mvPlayerUnique'
+
+  var video =
+    document.getElementById(
+      'mvVideo'
     );
 
-    var centerPlay = document.getElementById(
-        'mvCenterPlayUnique'
+
+  if (!player || !video) {
+    return;
+  }
+
+
+  var playBtn =
+    document.getElementById(
+      'mvPlay'
     );
 
-    var playBtn = document.getElementById(
-        'mvPlayUnique'
+
+  var centerPlay =
+    document.getElementById(
+      'mvCenterPlay'
     );
 
-    var muteBtn = document.getElementById(
-        'mvMuteUnique'
+
+  var muteBtn =
+    document.getElementById(
+      'mvMute'
     );
 
-    var volume = document.getElementById(
-        'mvVolumeUnique'
+
+  var volume =
+    document.getElementById(
+      'mvVolume'
     );
 
-    var timeText = document.getElementById(
-        'mvTimeUnique'
+
+  var progressWrap =
+    document.getElementById(
+      'mvProgressWrap'
     );
 
-    var progressArea = document.getElementById(
-        'mvProgressAreaUnique'
+
+  var progress =
+    document.getElementById(
+      'mvProgress'
     );
 
-    var progress = document.getElementById(
-        'mvProgressUnique'
+
+  var buffer =
+    document.getElementById(
+      'mvBuffer'
     );
 
-    var buffer = document.getElementById(
-        'mvBufferUnique'
+
+  var handle =
+    document.getElementById(
+      'mvHandle'
     );
 
-    var handle = document.getElementById(
-        'mvHandleUnique'
+
+  var timeText =
+    document.getElementById(
+      'mvTime'
     );
 
-    var settingsBtn = document.getElementById(
-        'mvSettingsBtnUnique'
+
+  var settingsBtn =
+    document.getElementById(
+      'mvSettings'
     );
 
-    var settingsMenu = document.getElementById(
-        'mvSettingsMenuUnique'
+
+  var menu =
+    document.getElementById(
+      'mvMenu'
     );
 
-    var fullscreenBtn = document.getElementById(
-        'mvFullscreenUnique'
+
+  var fullscreenBtn =
+    document.getElementById(
+      'mvFullscreen'
     );
 
-    var fullscreenMenu = document.getElementById(
-        'mvFullscreenMenuUnique'
+
+  var fullscreenMenu =
+    document.getElementById(
+      'mvFullscreenMenu'
     );
 
-    var languageLabel = document.getElementById(
-        'mvLanguageUnique'
+
+  var languageLabel =
+    document.getElementById(
+      'mvLanguage'
     );
 
-    var loading = document.getElementById(
-        'mvLoadingUnique'
+
+  var errorBox =
+    document.getElementById(
+      'mvError'
     );
 
-    var errorBox = document.getElementById(
-        'mvErrorUnique'
+
+  var hls = null;
+
+  var currentQuality =
+    'auto';
+
+  var language =
+    DEFAULT_LANGUAGE ||
+    'Hindi';
+
+
+  languageLabel.textContent =
+    language;
+
+
+  function getSource(quality) {
+
+    if (!VIDEO_SOURCES) {
+      return '';
+    }
+
+    return (
+      VIDEO_SOURCES[
+        String(quality)
+      ] || ''
     );
 
-    var hls = null;
+  }
 
-    var currentQuality = null;
 
-    function formatTime(seconds) {
+  function getAutoSource() {
 
-        if (!isFinite(seconds)) {
-            return '00:00';
-        }
+    return (
+      getSource('720') ||
+      getSource('1080') ||
+      getSource('480') ||
+      getSource('360') ||
+      ''
+    );
 
-        seconds = Math.max(
-            0,
-            Math.floor(seconds)
+  }
+
+
+  function formatTime(seconds) {
+
+    if (
+      !isFinite(seconds) ||
+      seconds < 0
+    ) {
+      seconds = 0;
+    }
+
+
+    seconds =
+      Math.floor(seconds);
+
+
+    var h =
+      Math.floor(
+        seconds / 3600
+      );
+
+
+    var m =
+      Math.floor(
+        (seconds % 3600) / 60
+      );
+
+
+    var s =
+      seconds % 60;
+
+
+    if (h > 0) {
+
+      return (
+        String(h).padStart(2, '0') +
+        ':' +
+        String(m).padStart(2, '0') +
+        ':' +
+        String(s).padStart(2, '0')
+      );
+
+    }
+
+
+    return (
+      String(m).padStart(2, '0') +
+      ':' +
+      String(s).padStart(2, '0')
+    );
+
+  }
+
+
+  function updateTime() {
+
+    var duration =
+      video.duration || 0;
+
+
+    var current =
+      video.currentTime || 0;
+
+
+    timeText.textContent =
+      formatTime(current) +
+      ' / ' +
+      formatTime(duration);
+
+
+    if (duration > 0) {
+
+      var percent =
+        (current / duration) * 100;
+
+
+      progress.style.width =
+        percent + '%';
+
+
+      handle.style.left =
+        percent + '%';
+
+    } else {
+
+      progress.style.width =
+        '0%';
+
+      handle.style.left =
+        '0%';
+
+    }
+
+  }
+
+
+  function updateBuffer() {
+
+    try {
+
+      if (
+        !video.buffered.length ||
+        !video.duration
+      ) {
+
+        buffer.style.width =
+          '0%';
+
+        return;
+      }
+
+
+      var end =
+        video.buffered.end(
+          video.buffered.length - 1
         );
 
-        var hours = Math.floor(
-            seconds / 3600
+
+      var percent =
+        Math.min(
+          100,
+          (end / video.duration) * 100
         );
 
-        var minutes = Math.floor(
-            (seconds % 3600) / 60
-        );
 
-        var secs = seconds % 60;
-
-        if (hours > 0) {
-
-            return String(hours).padStart(2, '0') +
-                ':' +
-                String(minutes).padStart(2, '0') +
-                ':' +
-                String(secs).padStart(2, '0');
-
-        }
-
-        return String(minutes).padStart(2, '0') +
-            ':' +
-            String(secs).padStart(2, '0');
-    }
+      buffer.style.width =
+        percent + '%';
 
 
-    function showLoading(show) {
+    } catch (e) {
 
-        loading.style.display =
-            show ? 'block' : 'none';
+      buffer.style.width =
+        '0%';
 
     }
 
+  }
 
-    function showError(show) {
 
-        errorBox.style.display =
-            show ? 'block' : 'none';
+  function updatePlayButtons() {
+
+    if (video.paused) {
+
+      playBtn.textContent =
+        '▶';
+
+      centerPlay.textContent =
+        '▶';
+
+      centerPlay.style.display =
+        'flex';
+
+    } else {
+
+      playBtn.textContent =
+        '❚❚';
+
+      centerPlay.style.display =
+        'none';
+
+    }
+
+  }
+
+
+  function showError(show) {
+
+    errorBox.style.display =
+      show
+        ? 'block'
+        : 'none';
+
+  }
+
+
+  function destroyHls() {
+
+    if (hls) {
+
+      try {
+        hls.destroy();
+      } catch (e) {
+      }
+
+      hls = null;
+
+    }
+
+  }
+
+
+  function playAfterSwitch(
+    shouldPlay
+  ) {
+
+    if (!shouldPlay) {
+      return;
+    }
+
+
+    var promise =
+      video.play();
+
+
+    if (
+      promise &&
+      promise.catch
+    ) {
+
+      promise.catch(
+        function () {}
+      );
+
+    }
+
+  }
+
+
+  function switchSource(
+    url,
+    shouldPlay,
+    savedTime
+  ) {
+
+    if (!url) {
+
+      showError(true);
+
+      return;
 
     }
 
 
-    function updatePlayButton() {
-
-        if (video.paused) {
-
-            playBtn.innerHTML = '▶';
-            centerPlay.style.display = 'flex';
-
-        } else {
-
-            playBtn.innerHTML = '❚❚';
-            centerPlay.style.display = 'none';
-
-        }
-
-    }
+    showError(false);
 
 
-    function updateMuteButton() {
+    destroyHls();
+
+
+    var wasPlaying =
+      typeof shouldPlay === 'boolean'
+        ? shouldPlay
+        : !video.paused;
+
+
+    var oldTime =
+      typeof savedTime === 'number'
+        ? savedTime
+        : (
+            video.currentTime ||
+            0
+          );
+
+
+    video.pause();
+
+
+    video.src = url;
+
+
+    video.load();
+
+
+    function restore() {
+
+      try {
 
         if (
-            video.muted ||
-            video.volume === 0
+          oldTime > 0 &&
+          isFinite(video.duration)
         ) {
 
-            muteBtn.innerHTML = '🔇';
-
-        } else {
-
-            muteBtn.innerHTML = '🔊';
-
-        }
-
-    }
-
-
-    function updateTime() {
-
-        var duration =
-            video.duration || 0;
-
-        var current =
-            video.currentTime || 0;
-
-        timeText.innerHTML =
-            formatTime(current) +
-            ' / ' +
-            formatTime(duration);
-
-        var percent = 0;
-
-        if (duration > 0) {
-
-            percent =
-                (current / duration) * 100;
-
-        }
-
-        progress.style.width =
-            percent + '%';
-
-        handle.style.left =
-            percent + '%';
-
-    }
-
-
-    function updateBuffer() {
-
-        try {
-
-            if (
-                video.buffered &&
-                video.buffered.length &&
-                video.duration
-            ) {
-
-                var end =
-                    video.buffered.end(
-                        video.buffered.length - 1
-                    );
-
-                var percent =
-                    (end / video.duration) * 100;
-
-                buffer.style.width =
-                    Math.min(
-                        100,
-                        percent
-                    ) + '%';
-
-            }
-
-        } catch (e) {}
-
-    }
-
-
-    function seekFromEvent(e) {
-
-        var rect =
-            progressArea.getBoundingClientRect();
-
-        var x =
-            e.clientX - rect.left;
-
-        var ratio =
-            x / rect.width;
-
-        ratio =
-            Math.max(
+          video.currentTime =
+            Math.min(
+              oldTime,
+              Math.max(
                 0,
-                Math.min(1, ratio)
+                video.duration - 0.25
+              )
             );
 
-        if (video.duration) {
-
-            video.currentTime =
-                ratio * video.duration;
-
-        }
-
-    }
-
-
-    function setActiveQuality(q) {
-
-        var options =
-            settingsMenu.querySelectorAll(
-                '.mv-option[data-quality]'
-            );
-
-        for (
-            var i = 0;
-            i < options.length;
-            i++
+        } else if (
+          oldTime > 0
         ) {
 
-            var item =
-                options[i];
-
-            item.classList.toggle(
-                'active',
-                item.getAttribute('data-quality') === q
-            );
+          video.currentTime =
+            oldTime;
 
         }
+
+      } catch (e) {
+      }
+
+
+      playAfterSwitch(
+        wasPlaying
+      );
+
+
+      updateTime();
+      updateBuffer();
 
     }
 
 
-    function switchSource(url, quality) {
+    video.addEventListener(
+      'loadedmetadata',
+      restore,
+      {
+        once: true
+      }
+    );
 
-        if (!url) {
-            showError(true);
-            return;
-        }
+  }
 
-        var currentTime =
-            video.currentTime || 0;
 
-        var wasPlaying =
-            !video.paused;
+  function loadQuality(
+    quality
+  ) {
 
-        showError(false);
-        showLoading(true);
+    currentQuality =
+      quality;
 
-        currentQuality = quality;
 
-        setActiveQuality(quality);
+    var url = '';
 
-        if (hls) {
+
+    if (
+      quality === 'auto'
+    ) {
+
+      url =
+        getAutoSource();
+
+    } else {
+
+      url =
+        getSource(quality);
+
+    }
+
+
+    if (!url) {
+
+      showError(true);
+
+      return;
+
+    }
+
+
+    var currentTime =
+      video.currentTime || 0;
+
+
+    var wasPlaying =
+      !video.paused;
+
+
+    if (
+      quality === 'auto' &&
+      VIDEO_SOURCES.hls &&
+      window.Hls &&
+      Hls.isSupported()
+    ) {
+
+      showError(false);
+
+
+      destroyHls();
+
+
+      hls = new Hls({
+        autoStartLoad: true
+      });
+
+
+      hls.loadSource(
+        VIDEO_SOURCES.hls
+      );
+
+
+      hls.attachMedia(
+        video
+      );
+
+
+      hls.on(
+        Hls.Events.MANIFEST_PARSED,
+        function () {
+
+          if (
+            currentTime > 0
+          ) {
 
             try {
-                hls.destroy();
-            } catch (e) {}
 
-            hls = null;
+              video.currentTime =
+                currentTime;
 
-        }
-
-        var isHls =
-            /\.m3u8($|\?)/i.test(url);
-
-        if (
-            isHls &&
-            window.Hls &&
-            Hls.isSupported()
-        ) {
-
-            hls = new Hls();
-
-            hls.loadSource(url);
-            hls.attachMedia(video);
-
-            hls.on(
-                Hls.Events.MANIFEST_PARSED,
-                function () {
-
-                    try {
-                        video.currentTime =
-                            currentTime;
-                    } catch (e) {}
-
-                    if (wasPlaying) {
-                        video.play().catch(
-                            function () {}
-                        );
-                    }
-
-                    showLoading(false);
-
-                }
-            );
-
-            hls.on(
-                Hls.Events.ERROR,
-                function () {
-                    showLoading(false);
-                }
-            );
-
-            return;
-        }
-
-        video.src = url;
-
-        video.addEventListener(
-            'loadedmetadata',
-            function restoreTimeOnce() {
-
-                video.removeEventListener(
-                    'loadedmetadata',
-                    restoreTimeOnce
-                );
-
-                try {
-
-                    if (
-                        currentTime > 0 &&
-                        isFinite(video.duration)
-                    ) {
-
-                        video.currentTime =
-                            Math.min(
-                                currentTime,
-                                Math.max(
-                                    0,
-                                    video.duration - 0.5
-                                )
-                            );
-
-                    }
-
-                } catch (e) {}
-
-                if (wasPlaying) {
-
-                    video.play().catch(
-                        function () {}
-                    );
-
-                }
-
-                showLoading(false);
-
+            } catch (e) {
             }
+
+          }
+
+
+          playAfterSwitch(
+            wasPlaying
+          );
+
+        }
+      );
+
+
+      return;
+
+    }
+
+
+    switchSource(
+      url,
+      wasPlaying,
+      currentTime
+    );
+
+  }
+
+
+  function setActiveQuality() {
+
+    var options =
+      menu.querySelectorAll(
+        '.mv-option[data-quality]'
+      );
+
+
+    for (
+      var i = 0;
+      i < options.length;
+      i++
+    ) {
+
+      var option =
+        options[i];
+
+
+      var q =
+        option.getAttribute(
+          'data-quality'
         );
 
-        video.load();
+
+      option.classList.toggle(
+        'active',
+        q === currentQuality
+      );
+
+
+      var available =
+        q === 'auto'
+          ? !!getAutoSource()
+          : !!getSource(q);
+
+
+      if (!available) {
+
+        option.style.display =
+          'none';
+
+      } else {
+
+        option.style.display =
+          'flex';
+
+      }
 
     }
 
+  }
 
-    function chooseInitialSource() {
 
-        var preferred = [
-            '720',
-            '1080',
-            '480',
-            '360'
-        ];
+  function setLanguage(
+    lang
+  ) {
 
-        for (
-            var i = 0;
-            i < preferred.length;
-            i++
-        ) {
+    language =
+      lang ||
+      language ||
+      'Hindi';
 
-            var q = preferred[i];
 
-            if (VIDEO_SOURCES[q]) {
+    languageLabel.textContent =
+      language;
 
-                return {
-                    quality: q,
-                    url: VIDEO_SOURCES[q]
-                };
 
-            }
+    var options =
+      menu.querySelectorAll(
+        '.mv-language-option'
+      );
 
-        }
 
-        if (VIDEO_SOURCES.hls) {
+    for (
+      var i = 0;
+      i < options.length;
+      i++
+    ) {
 
-            return {
-                quality: 'auto',
-                url: VIDEO_SOURCES.hls
-            };
-
-        }
-
-        return null;
+      options[i].classList.toggle(
+        'active',
+        options[i].getAttribute(
+          'data-language'
+        ) === language
+      );
 
     }
 
+  }
 
-    function setupQualityOptions() {
 
-        var options =
-            settingsMenu.querySelectorAll(
-                '.mv-option[data-quality]'
-            );
+  function setSpeed(
+    speed
+  ) {
 
-        for (
-            var i = 0;
-            i < options.length;
-            i++
-        ) {
+    var value =
+      parseFloat(speed);
 
-            var item =
-                options[i];
 
-            var q =
-                item.getAttribute(
-                    'data-quality'
-                );
-
-            if (
-                q !== 'auto' &&
-                !VIDEO_SOURCES[q]
-            ) {
-
-                item.classList.add(
-                    'hidden-quality'
-                );
-
-            }
-
-        }
-
+    if (!isFinite(value)) {
+      value = 1;
     }
 
 
-    function setupLanguage() {
-
-        var normalized =
-            String(DEFAULT_LANGUAGE || '')
-                .trim()
-                .toLowerCase();
-
-        if (!normalized) {
-            normalized = 'unknown';
-        }
-
-        languageLabel.innerHTML =
-            DEFAULT_LANGUAGE || 'Language';
-
-        var options =
-            settingsMenu.querySelectorAll(
-                '.mv-language-option'
-            );
-
-        for (
-            var i = 0;
-            i < options.length;
-            i++
-        ) {
-
-            var item = options[i];
-
-            var lang =
-                item.getAttribute(
-                    'data-language'
-                );
-
-            if (
-                lang.toLowerCase() ===
-                normalized
-            ) {
-
-                item.classList.add(
-                    'active'
-                );
-
-            } else {
-
-                item.classList.remove(
-                    'active'
-                );
-
-            }
-
-        }
-
-    }
+    video.playbackRate =
+      value;
 
 
-    function setSpeed(speed) {
-
-        var value =
-            parseFloat(speed);
-
-        if (!isFinite(value)) {
-            value = 1;
-        }
-
-        video.playbackRate = value;
-
-        var options =
-            settingsMenu.querySelectorAll(
-                '.mv-speed-option'
-            );
-
-        for (
-            var i = 0;
-            i < options.length;
-            i++
-        ) {
-
-            var item =
-                options[i];
-
-            item.classList.toggle(
-                'active',
-                parseFloat(
-                    item.getAttribute('data-speed')
-                ) === value
-            );
-
-        }
-
-    }
+    var options =
+      menu.querySelectorAll(
+        '.mv-speed-option'
+      );
 
 
-    function toggleFullscreen() {
-
-        if (!document.fullscreenElement) {
-
-            if (player.requestFullscreen) {
-
-                player.requestFullscreen().catch(
-                    function () {}
-                );
-
-            } else if (
-                player.webkitRequestFullscreen
-            ) {
-
-                player.webkitRequestFullscreen();
-
-            }
-
-        } else {
-
-            if (document.exitFullscreen) {
-
-                document.exitFullscreen().catch(
-                    function () {}
-                );
-
-            } else if (
-                document.webkitExitFullscreen
-            ) {
-
-                document.webkitExitFullscreen();
-
-            }
-
-        }
-
-    }
-
-
-    centerPlay.addEventListener(
-        'click',
-        function () {
-
-            video.play().catch(
-                function () {}
-            );
-
-        }
-    );
-
-
-    playBtn.addEventListener(
-        'click',
-        function () {
-
-            if (video.paused) {
-
-                video.play().catch(
-                    function () {}
-                );
-
-            } else {
-
-                video.pause();
-
-            }
-
-        }
-    );
-
-
-    video.addEventListener(
-        'play',
-        updatePlayButton
-    );
-
-
-    video.addEventListener(
-        'pause',
-        updatePlayButton
-    );
-
-
-    video.addEventListener(
-        'timeupdate',
-        updateTime
-    );
-
-
-    video.add
+    for (
+      var i = 0;
+     
