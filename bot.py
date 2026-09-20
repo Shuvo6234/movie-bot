@@ -264,17 +264,28 @@ def as_paragraphs(v):
     return [p.strip() for p in re.split(r"\n\s*\n", str(v or "")) if p.strip()]
 
 
+YEAR_RE = re.compile(r"(?<!\d)(19[5-9]\d|20[0-4]\d)(?!\d)")
+
+
+def find_year(filename):
+    """Release year only if the file name contains one (e.g. 'My Film 2019.mp4'), else None."""
+    m = YEAR_RE.search(Path(filename).stem)
+    return int(m.group(1)) if m else None
+
+
 def clean_hint(filename):
     t = Path(filename).stem
     t = re.sub(r"[#@]\S+", " ", t)                     # hashtags / mentions
     t = re.sub(r"[_.\-]+", " ", t)
     t = re.sub(r"[^\w\s]", " ", t, flags=re.UNICODE)   # emojis and symbols
-    return re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    no_year = re.sub(r"\s+", " ", YEAR_RE.sub(" ", t)).strip()
+    return no_year or t
 
 
 def analyze(filename_hint, frames, audio_bytes, site_labels):
     hint = clean_hint(filename_hint)
-    year = datetime.now().year
+    year = find_year(filename_hint)
     prompt = f"""You are a film writer. You are publishing an ORIGINAL film, on its own director's film
 blog. You get 12 frames spread across the film and an audio sample.
 File name hint (may be messy): "{hint}". Language hint (may be empty): "{LANGUAGE_HINT}".
@@ -286,7 +297,7 @@ Rules:
   stay general and talk about mood, visuals, sound and themes instead of specific plot facts.
 - Never invent cast, crew, awards, festivals, ratings, box office or plot facts you cannot see.
 - No piracy words (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
-- The title must be a real film title of 1-6 words. No hashtags, emojis or words like "trending reels".
+- The title must be a real film title of 1-6 words. No hashtags, emojis, year or words like "trending reels".
   If the file name hint is messy, invent a fitting title from what the film is about.
 
 Return ONLY JSON with these keys:
@@ -301,7 +312,6 @@ Return ONLY JSON with these keys:
        (genre, language, mood, who it suits, runtime feel),
   genres: list of 1-3 genres,
   language: main spoken language,
-  release_year: integer (use {year} if unknown),
   content_rating: one of "General audience", "Teen and above", "Mature audience",
   tags: list of up to 6 short keywords,
   labels: pick 1-4 categories that best fit this film, ONLY from this exact list
@@ -333,7 +343,7 @@ Return ONLY JSON with these keys:
         "faq": faq[:4],
         "genres": data.get("genres") or ["Drama"],
         "language": data.get("language") or LANGUAGE_HINT or "Unknown",
-        "release_year": data.get("release_year") or year,
+        "release_year": year,
         "content_rating": data.get("content_rating") or "General audience",
         "tags": data.get("tags") or [],
         "labels": pick_labels(data.get("labels"), site_labels),
@@ -404,7 +414,10 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur):
     e = html.escape
     title = e(meta["title"])
     year = meta["release_year"]
+    ytxt = f" ({year})" if year else ""
+    lang_known = meta["language"] and meta["language"].lower() != "unknown"
     lang = e(meta["language"])
+    lang_tag = f' <span style="color:#f2f200">{{{lang}}}</span>' if lang_known else ""
     genres = ", ".join(e(g) for g in meta["genres"])
     fps_txt = fmt_fps(fps)
     qualities = " - ".join(f"{h}p" for h, _, _ in outputs)
@@ -423,11 +436,14 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur):
     hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.6);margin:22px 0"/>'
     h3 = '<h3 style="text-align:center">{}</h3>'
 
-    info = [f"<b>Movie Name:</b> {title}", f"<b>Release Year:</b> {year}"]
+    info = [f"<b>Movie Name:</b> {title}"]
+    if year:
+        info.append(f"<b>Release Year:</b> {year}")
     if DIRECTOR_NAME:
         info.append(f"<b>Directed by:</b> {e(DIRECTOR_NAME)}")
+    if lang_known:
+        info.append(f"<b>Language:</b> {lang}")
     info += [
-        f"<b>Language:</b> {lang}",
         f"<b>Runtime:</b> {fmt_runtime(dur)}",
         f"<b>Genres:</b> {genres}",
         f"<b>Content Advisory:</b> {e(meta['content_rating'])}",
@@ -439,7 +455,7 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur):
     parts = [
         f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title}" '
         f'width="270" style="max-width:60%;height:auto;border-radius:8px"/></div>',
-        f'<p style="text-align:center"><b>{title} ({year})</b> - {lang} film</p>',
+        f'<p style="text-align:center"><b>{title}{ytxt}</b>{" - " + lang + " film" if lang_known else ""}</p>',
     ]
     if meta["tagline"]:
         parts.append(f'<p style="text-align:center"><i>{e(meta["tagline"])}</i></p>')
@@ -469,8 +485,7 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur):
         direct = (f"https://drive.usercontent.google.com/download?id={fid}"
                   "&amp;export=download&amp;confirm=t")
         parts.append(
-            f'<h4 style="{head}">{title} ({year}) '
-            f'<span style="color:#f2f200">{{{lang}}}</span> '
+            f'<h4 style="{head}">{title}{ytxt}{lang_tag} '
             f'{h}p x264 {fps_txt}fps [{human(size)}]</h4>')
         parts.append(
             f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
@@ -533,7 +548,10 @@ def process(video, processed_folder, output_folder):
         labels = [unc] if unc else [g for g in meta["genres"]][:2] + [meta["language"]]
     labels = [str(l)[:40] for l in labels if l][:8]
     content = build_html(meta, thumb_id, shot_ids, outputs, fps, dur)
-    body = {"kind": "blogger#post", "title": f'{meta["title"]} ({meta["release_year"]}) {meta["language"]} Movie - Watch Online & Download',
+    ytxt = f' ({meta["release_year"]})' if meta["release_year"] else ""
+    ltxt = f' {meta["language"]}' if meta["language"].lower() != "unknown" else ""
+    body = {"kind": "blogger#post",
+            "title": f'{meta["title"]}{ytxt}{ltxt} Movie - Watch Online & Download',
             "content": content, "labels": labels}
     post = retry(lambda: blogger.posts().insert(
         blogId=BLOG_ID, body=body, isDraft=not PUBLISH).execute())
