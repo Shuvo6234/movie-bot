@@ -784,6 +784,114 @@ TIMER_SCRIPT = """<script>
 </script>""" % WAIT_SECONDS
 
 
+
+def build_vcdn_player(playback_url, title):
+    """Return the custom player using VCDN HLS playback instead of the VCDN iframe."""
+    src = html.escape(playback_url, quote=True)
+    safe_title = html.escape(title, quote=True)
+    return f"""
+<style>
+.vc-player {{ position:relative; width:100%; max-width:1100px; margin:auto; background:#000; overflow:hidden; border-radius:8px; font-family:Arial,sans-serif; user-select:none; }}
+.vc-video {{ display:block; width:100%; height:auto; min-height:240px; background:#000; object-fit:contain; transform-origin:center center; transition:transform .18s ease; }}
+.vc-center-play {{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:70px; height:70px; border:0; border-radius:50%; background:#19d66b; color:#000; font-size:28px; cursor:pointer; z-index:5; }}
+.vc-controls {{ position:absolute; left:0; right:0; bottom:0; padding:10px 13px 12px; background:linear-gradient(transparent,rgba(0,0,0,.94)); z-index:10; }}
+.vc-progress {{ width:100%; height:5px; background:rgba(255,255,255,.25); border-radius:10px; cursor:pointer; margin-bottom:9px; }}
+.vc-progress-fill {{ width:0; height:100%; background:#19d66b; border-radius:10px; }}
+.vc-control-row {{ display:flex; align-items:center; gap:10px; }}
+.vc-btn {{ background:transparent; color:#fff; border:0; font-size:19px; cursor:pointer; padding:4px; }}
+.vc-time {{ color:#fff; font-size:13px; white-space:nowrap; }}
+.vc-spacer {{ flex:1; }}
+.vc-volume {{ width:75px; }}
+.vc-settings {{ position:relative; }}
+.vc-settings-menu {{ position:absolute; right:0; bottom:42px; width:210px; max-height:430px; overflow-y:auto; background:rgba(18,18,18,.98); border-radius:9px; padding:10px 0; display:none; box-shadow:0 5px 30px rgba(0,0,0,.6); z-index:30; }}
+.vc-settings-menu.show {{ display:block; }}
+.vc-menu-title {{ color:#999; font-size:12px; padding:7px 15px 8px; text-transform:uppercase; border-top:1px solid rgba(255,255,255,.08); }}
+.vc-menu-title:first-child {{ border-top:0; }}
+.vc-quality-btn,.vc-speed-btn {{ width:100%; background:transparent; border:0; color:#fff; padding:9px 15px; text-align:left; cursor:pointer; font-size:14px; }}
+.vc-quality-btn:hover,.vc-speed-btn:hover {{ background:rgba(255,255,255,.1); }}
+.vc-quality-btn.active,.vc-speed-btn.active {{ color:#19d66b; }}
+.vc-scale-controls {{ display:flex; align-items:center; justify-content:space-between; padding:7px 12px 10px; }}
+.vc-scale-controls button {{ width:35px; height:31px; border:0; border-radius:5px; background:#292929; color:#fff; font-size:21px; cursor:pointer; }}
+.vc-scale-controls button:hover {{ background:#3a3a3a; }}
+.vc-scale-value {{ color:#fff; font-size:13px; min-width:50px; text-align:center; }}
+.vc-error {{ position:absolute; inset:0; display:none; align-items:center; justify-content:center; padding:25px; text-align:center; color:#fff; background:rgba(0,0,0,.86); z-index:20; }}
+@media(max-width:600px) {{ .vc-center-play {{ width:56px; height:56px; font-size:23px; }} .vc-volume {{ width:55px; }} .vc-time {{ font-size:11px; }} .vc-settings-menu {{ width:190px; bottom:40px; }} }}
+</style>
+
+<div class="vc-player" id="vcPlayer">
+  <video id="vcVideo" class="vc-video" playsinline preload="metadata" controlslist="nodownload" title="{safe_title}"></video>
+  <button class="vc-center-play" id="vcCenterPlay" aria-label="Play">▶</button>
+  <div class="vc-error" id="vcError"></div>
+  <div class="vc-controls">
+    <div class="vc-progress" id="vcProgress"><div class="vc-progress-fill" id="vcProgressFill"></div></div>
+    <div class="vc-control-row">
+      <button class="vc-btn" id="vcPlay">▶</button>
+      <span class="vc-time"><span id="vcCurrent">00:00</span> / <span id="vcDuration">00:00</span></span>
+      <button class="vc-btn" id="vcMute">🔊</button>
+      <input class="vc-volume" id="vcVolume" type="range" min="0" max="1" step="0.05" value="1">
+      <div class="vc-spacer"></div>
+      <div class="vc-settings">
+        <button class="vc-btn" id="vcSettings">⚙</button>
+        <div class="vc-settings-menu" id="vcSettingsMenu">
+          <div class="vc-menu-title">Quality</div>
+          <button class="vc-quality-btn active" data-level="auto">✓ Auto</button>
+          <div id="vcQualityList"></div>
+          <div class="vc-menu-title">Playback Speed</div>
+          <button class="vc-speed-btn" data-speed="0.5">0.5x</button>
+          <button class="vc-speed-btn" data-speed="0.75">0.75x</button>
+          <button class="vc-speed-btn active" data-speed="1">✓ 1x</button>
+          <button class="vc-speed-btn" data-speed="1.25">1.25x</button>
+          <button class="vc-speed-btn" data-speed="1.5">1.5x</button>
+          <button class="vc-speed-btn" data-speed="2">2x</button>
+          <div class="vc-menu-title">Viewer Scale</div>
+          <div class="vc-scale-controls"><button id="vcZoomOut">−</button><span class="vc-scale-value" id="vcScaleValue">100%</span><button id="vcZoomIn">+</button></div>
+        </div>
+      </div>
+      <button class="vc-btn" id="vcFullscreen">⛶</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<script>
+(function() {{
+  const video=document.getElementById("vcVideo"), player=document.getElementById("vcPlayer"), playBtn=document.getElementById("vcPlay"), centerPlay=document.getElementById("vcCenterPlay"), progress=document.getElementById("vcProgress"), progressFill=document.getElementById("vcProgressFill"), currentTime=document.getElementById("vcCurrent"), duration=document.getElementById("vcDuration"), muteBtn=document.getElementById("vcMute"), volume=document.getElementById("vcVolume"), settingsBtn=document.getElementById("vcSettings"), settingsMenu=document.getElementById("vcSettingsMenu"), fullscreenBtn=document.getElementById("vcFullscreen"), zoomIn=document.getElementById("vcZoomIn"), zoomOut=document.getElementById("vcZoomOut"), scaleValue=document.getElementById("vcScaleValue"), qualityList=document.getElementById("vcQualityList"), errorBox=document.getElementById("vcError");
+  const source="{src}"; let hls=null, scale=1;
+  function formatTime(seconds) {{ if(!isFinite(seconds)) return "00:00"; const h=Math.floor(seconds/3600),m=Math.floor((seconds%3600)/60),s=Math.floor(seconds%60); return h>0 ? String(h).padStart(2,"0")+":"+String(m).padStart(2,"0")+":"+String(s).padStart(2,"0") : String(m).padStart(2,"0")+":"+String(s).padStart(2,"0"); }}
+  function showError(msg) {{ errorBox.textContent=msg; errorBox.style.display="flex"; }}
+  function togglePlay() {{ if(video.paused) video.play().catch(function(){{}}); else video.pause(); }}
+  playBtn.addEventListener("click",togglePlay); centerPlay.addEventListener("click",togglePlay);
+  video.addEventListener("play",function(){{playBtn.textContent="❚❚";centerPlay.style.display="none";}});
+  video.addEventListener("pause",function(){{playBtn.textContent="▶";centerPlay.style.display="block";}});
+  video.addEventListener("loadedmetadata",function(){{duration.textContent=formatTime(video.duration);}});
+  video.addEventListener("timeupdate",function(){{currentTime.textContent=formatTime(video.currentTime); if(video.duration) progressFill.style.width=((video.currentTime/video.duration)*100)+"%";}});
+  progress.addEventListener("click",function(e){{const r=progress.getBoundingClientRect(),pct=(e.clientX-r.left)/r.width;if(video.duration) video.currentTime=pct*video.duration;}});
+  volume.addEventListener("input",function(){{video.volume=parseFloat(this.value);video.muted=video.volume===0;muteBtn.textContent=video.muted?"🔇":"🔊";}});
+  muteBtn.addEventListener("click",function(){{video.muted=!video.muted;muteBtn.textContent=video.muted?"🔇":"🔊";}});
+  settingsBtn.addEventListener("click",function(e){{e.stopPropagation();settingsMenu.classList.toggle("show");}});
+  document.addEventListener("click",function(e){{if(!settingsMenu.contains(e.target)&&e.target!==settingsBtn)settingsMenu.classList.remove("show");}});
+  function setActiveQuality(btn) {{document.querySelectorAll(".vc-quality-btn").forEach(function(b){{b.classList.remove("active");b.textContent=b.textContent.replace("✓ ","");}});btn.classList.add("active");btn.textContent="✓ "+btn.textContent;}}
+  function makeQualityButtons() {{
+    if(!hls || !hls.levels) return;
+    const seen={{}};
+    hls.levels.forEach(function(level,index) {{ const height=level.height; if(!height || seen[height]) return; seen[height]=true; const b=document.createElement("button"); b.className="vc-quality-btn"; b.dataset.level=String(index); b.textContent=height+"p"; b.addEventListener("click",function(){{hls.currentLevel=index;setActiveQuality(b);settingsMenu.classList.remove("show");}}); qualityList.appendChild(b); }});
+  }}
+  function initHls() {{
+    if(video.canPlayType("application/vnd.apple.mpegurl")) {{ video.src=source; video.addEventListener("loadedmetadata",function(){{}}); return; }}
+    if(window.Hls && Hls.isSupported()) {{ hls=new Hls({{enableWorker:true,capLevelToPlayerSize:true}}); hls.loadSource(source); hls.attachMedia(video); hls.on(Hls.Events.MANIFEST_PARSED,function(){{makeQualityButtons();}}); hls.on(Hls.Events.ERROR,function(event,data){{if(data.fatal) showError("Video stream could not be loaded. Please refresh the page and try again.");}}); return; }}
+    showError("This browser does not support HLS playback.");
+  }}
+  document.querySelectorAll(".vc-speed-btn").forEach(function(button){{button.addEventListener("click",function(){{const speed=parseFloat(this.dataset.speed);video.playbackRate=speed;document.querySelectorAll(".vc-speed-btn").forEach(function(btn){{btn.classList.remove("active");btn.textContent=btn.textContent.replace("✓ ","");}});this.classList.add("active");this.textContent="✓ "+speed+"x";settingsMenu.classList.remove("show");}});}});
+  function updateScale() {{scaleValue.textContent=Math.round(scale*100)+"%";video.style.transform="scale("+scale+")";}}
+  zoomIn.addEventListener("click",function(){{if(scale<2){{scale+=0.25;updateScale();}}}}); zoomOut.addEventListener("click",function(){{if(scale>0.75){{scale-=0.25;updateScale();}}}});
+  fullscreenBtn.addEventListener("click",function(){{if(!document.fullscreenElement){{if(player.requestFullscreen)player.requestFullscreen();}}else document.exitFullscreen();}});
+  video.addEventListener("dblclick",function(){{if(!document.fullscreenElement){{if(player.requestFullscreen)player.requestFullscreen();}}else document.exitFullscreen();}});
+  video.addEventListener("error",function(){{if(video.error) showError("Video playback error. Please refresh and try again.");}});
+  initHls();
+}})();
+</script>
+"""
+
 def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     e = html.escape
     title = e(meta["title"])
@@ -839,18 +947,10 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts += [f"<p>{p}</p>" for p in syn]
 
     parts.append(f"<h3>Watch {title} Online</h3>")
-    embed_url = vcdn["embed_url"]
-    parts.append(
-        f'<div style="width:100%;max-width:100%;background:#000;border-radius:8px;'
-        f'overflow:hidden;margin:0 auto 24px">'
-        f'<iframe src="{e(embed_url, quote=True)}" '
-        'width="100%" height="420" frameborder="0" '
-        'allow="autoplay; encrypted-media; picture-in-picture" '
-        'allowfullscreen="true" style="border:0;display:block"></iframe>'
-        f'</div>')
-    parts.append(
-        '<p style="text-align:center;font-size:13px;opacity:.8">'
-        'Adaptive streaming player powered by VCDN.</p>')
+    playback_url = vcdn.get("playback_url")
+    if not playback_url:
+        raise RuntimeError("VCDN did not return a playback_url for the custom player.")
+    parts.append(build_vcdn_player(playback_url, meta["title"]))
 
     if review:
         parts.append(h3.format(f"{title} - Film Review and Analysis"))
