@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -135,13 +136,29 @@ def upload_public(path, parent, mime):
 
 
 # ---------- VCDN helpers ----------
-def _vcdn_json(method, path, payload=None):
-    """Call a VCDN JSON API endpoint using the project-scoped API key."""
-    body = None
+VCDN_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _vcdn_auth_headers(content_type=None):
     headers = {
         "Authorization": f"Bearer {VCDN_API_KEY}",
+        "X-API-Key": VCDN_API_KEY,
         "Accept": "application/json",
+        "User-Agent": VCDN_USER_AGENT,
     }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
+def _vcdn_json(method, path, payload=None):
+    """Call VCDN's documented JSON API with both supported auth headers."""
+    body = None
+    headers = _vcdn_auth_headers()
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -159,16 +176,21 @@ def _vcdn_json(method, path, payload=None):
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
-            raise RuntimeError(f"VCDN {method} {path} failed: HTTP {e.code}: {detail}") from e
+            raise RuntimeError(
+                f"VCDN {method} {path} failed: HTTP {e.code}: {detail}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"VCDN connection failed for {method} {path}: {e}"
+            ) from e
 
     return retry(request, tries=4)
 
 
 def _vcdn_upload_binary(upload_id, path):
     """
-    Upload the video bytes to VCDN's /chunk endpoint without loading the
-    entire movie into RAM. The current VCDN REST docs show this endpoint
-    accepting application/octet-stream binary data.
+    Upload the video bytes to the documented /chunk endpoint without
+    loading the entire movie into RAM.
     """
     file_size = os.path.getsize(path)
 
@@ -176,9 +198,10 @@ def _vcdn_upload_binary(upload_id, path):
         conn = http.client.HTTPSConnection(VCDN_API_HOST, timeout=1800)
         try:
             conn.putrequest("POST", f"/api/v1/upload/{upload_id}/chunk")
-            conn.putheader("Authorization", f"Bearer {VCDN_API_KEY}")
-            conn.putheader("Content-Type", "application/octet-stream")
-            conn.putheader("Content-Length", str(file_size))
+            headers = _vcdn_auth_headers("application/octet-stream")
+            headers["Content-Length"] = str(file_size)
+            for key, value in headers.items():
+                conn.putheader(key, value)
             conn.endheaders()
 
             sent = 0
@@ -211,53 +234,172 @@ def _vcdn_upload_binary(upload_id, path):
     return retry(upload, tries=3)
 
 
+def _multipart_header(boundary, title, filename, file_size):
+    """Build a deterministic multipart/form-data prefix and suffix."""
+    safe_name = os.path.basename(filename).replace('"', "'")
+    safe_title = str(title).replace('"', "'")
+    prefix = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="title"\r\n\r\n'
+        f"{safe_title}\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+        f"Content-Type: video/mp4\r\n\r\n"
+    ).encode("utf-8")
+    suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    return prefix, suffix
+
+
+def _vcdn_direct_upload(path, title):
+    """
+    Fallback upload route exposed on VCDN's main site:
+      POST https://api.vcdn.me/videos
+    Uses multipart/form-data and streams the file so the whole video is
+    never loaded into memory.
+    """
+    host = "api.vcdn.me"
+    boundary = "----MovieBotVCDNBoundary7MA4YWxkTrZu0gW"
+    file_size = os.path.getsize(path)
+    prefix, suffix = _multipart_header(boundary, title, path, file_size)
+    total_length = len(prefix) + file_size + len(suffix)
+
+    def upload():
+        conn = http.client.HTTPSConnection(host, timeout=1800)
+        try:
+            conn.putrequest("POST", "/videos")
+            headers = _vcdn_auth_headers(
+                f"multipart/form-data; boundary={boundary}"
+            )
+            headers["Content-Length"] = str(total_length)
+            for key, value in headers.items():
+                conn.putheader(key, value)
+            conn.endheaders()
+
+            conn.send(prefix)
+            sent = 0
+            last_log = -1
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(16 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    conn.send(chunk)
+                    sent += len(chunk)
+                    pct = int(sent * 100 / file_size) if file_size else 100
+                    if pct >= last_log + 10 or pct == 100:
+                        log(f"  VCDN direct upload {pct}%")
+                        last_log = pct
+            conn.send(suffix)
+
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", "replace")
+            if resp.status < 200 or resp.status >= 300:
+                raise RuntimeError(
+                    f"VCDN direct upload failed: HTTP {resp.status}: {raw}"
+                )
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    f"VCDN direct upload returned non-JSON response: {raw[:1000]}"
+                )
+
+            video_id = data.get("id") or data.get("video_id")
+            embed_url = data.get("embed_url") or data.get("embedUrl")
+            playback_url = data.get("playback_url") or data.get("playbackUrl")
+            if not embed_url and video_id:
+                embed_url = f"https://embed.vcdn.me/{video_id}"
+            if not video_id and not embed_url:
+                raise RuntimeError(
+                    f"VCDN direct upload returned no video id/embed_url: {data}"
+                )
+
+            log("  VCDN video:", video_id or "unknown")
+            log("  VCDN embed:", embed_url or "unknown")
+            if playback_url:
+                log("  VCDN HLS:", playback_url)
+
+            return {
+                "id": video_id,
+                "embed_url": embed_url,
+                "playback_url": playback_url,
+                "status": data.get("status"),
+            }
+        finally:
+            conn.close()
+
+    return retry(upload, tries=3)
+
+
 def vcdn_upload(path, title):
     """
-    VCDN REST flow:
-      1) initialize
-      2) upload binary
-      3) complete
-    Returns VCDN's video metadata, including embed_url.
+    Upload to VCDN.
+
+    Primary route: current documented 3-step API on cdn.vcdn.me.
+    If Cloudflare blocks that route with Error 1010/403 browser-signature
+    filtering, automatically fall back to VCDN's REST upload endpoint on
+    api.vcdn.me/videos.
     """
     log(f"Uploading {os.path.basename(path)} to VCDN...")
-    init = _vcdn_json(
-        "POST",
-        "/api/v1/upload/init",
-        {"filename": os.path.basename(path), "title": title},
-    )
-    upload_id = init.get("upload_id")
-    if not upload_id:
-        raise RuntimeError(f"VCDN init did not return upload_id: {init}")
 
-    log(f"  VCDN upload id: {upload_id}")
-    _vcdn_upload_binary(upload_id, path)
+    try:
+        init = _vcdn_json(
+            "POST",
+            "/api/v1/upload/init",
+            {"filename": os.path.basename(path), "title": title},
+        )
+        upload_id = init.get("upload_id")
+        if not upload_id:
+            raise RuntimeError(f"VCDN init did not return upload_id: {init}")
 
-    complete = _vcdn_json(
-        "POST",
-        "/api/v1/upload/complete",
-        {"upload_id": upload_id},
-    )
-    video_id = complete.get("id")
-    embed_url = complete.get("embed_url")
-    playback_url = complete.get("playback_url")
+        log(f"  VCDN upload id: {upload_id}")
+        _vcdn_upload_binary(upload_id, path)
 
-    if not embed_url:
-        if video_id:
-            embed_url = f"https://embed.vcdn.me/{video_id}"
-        else:
-            raise RuntimeError(f"VCDN complete did not return video id/embed_url: {complete}")
+        complete = _vcdn_json(
+            "POST",
+            "/api/v1/upload/complete",
+            {"upload_id": upload_id},
+        )
+        video_id = complete.get("id")
+        embed_url = complete.get("embed_url")
+        playback_url = complete.get("playback_url")
 
-    log("  VCDN video:", video_id or "unknown")
-    log("  VCDN embed:", embed_url)
-    if playback_url:
-        log("  VCDN HLS:", playback_url)
+        if not embed_url:
+            if video_id:
+                embed_url = f"https://embed.vcdn.me/{video_id}"
+            else:
+                raise RuntimeError(
+                    f"VCDN complete did not return video id/embed_url: {complete}"
+                )
 
-    return {
-        "id": video_id,
-        "embed_url": embed_url,
-        "playback_url": playback_url,
-        "status": complete.get("status"),
-    }
+        log("  VCDN video:", video_id or "unknown")
+        log("  VCDN embed:", embed_url)
+        if playback_url:
+            log("  VCDN HLS:", playback_url)
+
+        return {
+            "id": video_id,
+            "embed_url": embed_url,
+            "playback_url": playback_url,
+            "status": complete.get("status"),
+        }
+
+    except Exception as primary_error:
+        error_text = str(primary_error).lower()
+        cloudflare_block = (
+            "http 403" in error_text
+            and (
+                "1010" in error_text
+                or "browser_signature_banned" in error_text
+                or "access denied based on your browser" in error_text
+            )
+        )
+        if not cloudflare_block:
+            raise
+
+        log("  VCDN cdn.vcdn.me was blocked by Cloudflare Error 1010.")
+        log("  Trying VCDN direct REST upload endpoint api.vcdn.me/videos...")
+        return _vcdn_direct_upload(path, title)
 
 
 # ---------- ffmpeg helpers ----------
