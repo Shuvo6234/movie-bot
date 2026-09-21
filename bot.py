@@ -409,7 +409,14 @@ def vcdn_upload(path, title):
                 {"uploadId": upload_id},
             )
 
-            video_id = complete.get("id") or complete.get("video_id")
+            # The live API currently returns `videoId` (camelCase), while the
+            # public docs show `id`. Accept both forms. `status=uploaded` means
+            # the file is received but transcoding may still be in progress.
+            video_id = (
+                complete.get("id")
+                or complete.get("video_id")
+                or complete.get("videoId")
+            )
             embed_url = (
                 complete.get("embed_url")
                 or complete.get("embedUrl")
@@ -418,25 +425,72 @@ def vcdn_upload(path, title):
                 complete.get("playback_url")
                 or complete.get("playbackUrl")
             )
+            status = complete.get("status")
 
-            if not embed_url and video_id:
-                embed_url = f"https://embed.vcdn.me/{video_id}"
-
-            if not video_id and not embed_url:
+            if not video_id:
                 raise RuntimeError(
-                    f"VCDN complete returned no video id/embed_url: {complete}"
+                    f"VCDN complete returned no video id: {complete}"
                 )
 
-            log("  VCDN video:", video_id or "unknown")
-            log("  VCDN embed:", embed_url or "unknown")
+            # Poll the video endpoint until VCDN finishes processing. The
+            # documented API exposes GET /api/v1/videos/{id}; this prevents us
+            # from publishing a player URL before the video is ready.
+            if status not in ("ready", "processed") or not embed_url:
+                deadline = time.time() + 10 * 60
+                last_video = complete
+                while time.time() < deadline:
+                    time.sleep(5)
+                    try:
+                        info = _vcdn_json(
+                            "GET",
+                            f"/api/v1/videos/{urllib.parse.quote(str(video_id), safe='')}"
+                        )
+                    except Exception as poll_error:
+                        log(f"  VCDN status check failed: {poll_error}")
+                        continue
+
+                    last_video = info or last_video
+                    status = info.get("status") or status
+                    embed_url = (
+                        info.get("embed_url")
+                        or info.get("embedUrl")
+                        or embed_url
+                    )
+                    playback_url = (
+                        info.get("playback_url")
+                        or info.get("playbackUrl")
+                        or playback_url
+                    )
+                    log(f"  VCDN processing status: {status}")
+
+                    if status in ("ready", "processed", "complete", "completed"):
+                        break
+                    if status in ("failed", "error"):
+                        raise RuntimeError(
+                            f"VCDN processing failed for {video_id}: {info}"
+                        )
+
+            # The embed URL is deterministic once a video ID exists. If the
+            # status endpoint did not return one, construct it as documented.
+            if not embed_url:
+                embed_url = f"https://embed.vcdn.me/{video_id}"
+
+            if not video_id or not embed_url:
+                raise RuntimeError(
+                    f"VCDN complete/status returned no usable player data: {last_video}"
+                )
+
+            log("  VCDN video:", video_id)
+            log("  VCDN embed:", embed_url)
             if playback_url:
                 log("  VCDN HLS:", playback_url)
+            log("  VCDN final status:", status or "unknown")
 
             return {
                 "id": video_id,
                 "embed_url": embed_url,
                 "playback_url": playback_url,
-                "status": complete.get("status"),
+                "status": status,
             }
 
         except Exception as chunk_error:
