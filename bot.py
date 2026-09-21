@@ -1,4 +1,3 @@
-
 """
 Movie Bot: Drive video -> multi-resolution -> VCDN Watch Online
 + Google Drive downloads + screenshots + 9:16 thumbnail
@@ -475,6 +474,13 @@ def vcdn_upload(path, title):
             if not embed_url:
                 embed_url = f"https://embed.vcdn.me/{video_id}"
 
+            # The live API may return the embed URL/status but omit playback_url.
+            # VCDN's documented HLS URL is deterministic from the video ID, so
+            # use the master playlist as a fallback for the custom HLS player.
+            if not playback_url and status in ("ready", "processed", "complete", "completed", "uploaded"):
+                playback_url = f"https://stream.vcdn.me/{video_id}/master.m3u8"
+                log("  VCDN HLS URL was missing from API response; using documented master playlist:", playback_url)
+
             if not video_id or not embed_url:
                 raise RuntimeError(
                     f"VCDN complete/status returned no usable player data: {last_video}"
@@ -948,8 +954,10 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
 
     parts.append(f"<h3>Watch {title} Online</h3>")
     playback_url = vcdn.get("playback_url")
+    if not playback_url and vcdn.get("id"):
+        playback_url = f"https://stream.vcdn.me/{vcdn['id']}/master.m3u8"
     if not playback_url:
-        raise RuntimeError("VCDN did not return a playback_url for the custom player.")
+        raise RuntimeError("VCDN did not provide a usable HLS playback URL for the custom player.")
     parts.append(build_vcdn_player(playback_url, meta["title"]))
 
     if review:
@@ -1080,3 +1088,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
