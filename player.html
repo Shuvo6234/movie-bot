@@ -25,6 +25,7 @@
 @keyframes mvspin { to { transform: rotate(360deg); } }
 .mv-settings { position: absolute; right: 15px; bottom: 65px; min-width: 200px; max-height: calc(100% - 75px); overflow-y: auto; background: rgba(20,20,20,.97); border-radius: 4px; display: none; z-index: 50; box-shadow: 0 4px 20px rgba(0,0,0,.5); }
 .mv-settings.show { display: block; }
+.mv-player:not(.mv-js) .mv-center-play, .mv-player:not(.mv-js) .mv-controls, .mv-player:not(.mv-js) .mv-loading, .mv-player:not(.mv-js) .mv-settings { display: none !important; }
 .mv-settings button { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 0; padding: 12px 14px; background: transparent; color: #fff; text-align: left; cursor: pointer; font-size: 14px; }
 .mv-settings button:hover { background: rgba(255,255,255,.1); }
 .mv-settings button.active { color: #36a34c; }
@@ -42,7 +43,7 @@
 </style>
 
 <div class="mv-player" id="mvPlayer">
-  <video id="mvVideo" class="mv-video" playsinline preload="metadata" controlslist="nodownload" title="__TITLE__"></video>
+  <video id="mvVideo" class="mv-video" playsinline controls preload="metadata" controlslist="nodownload" title="__TITLE__" src="https://drive.usercontent.google.com/download?id=__VIDEO_ID__&amp;export=download&amp;confirm=t"></video>
   <div class="mv-loading" id="mvLoading"></div>
 
   <button class="mv-center-play" id="mvCenterPlay" aria-label="Play">
@@ -93,8 +94,10 @@
 </div>
 
 <script>
+/*<![CDATA[*/
 (function () {
   var SOURCES = __SOURCES_JSON__;
+  var KEY = "__API_KEY__";
   var SPEEDS = [1, 1.25, 1.5, 2];
   var SCALES = [["contain", "Fit"], ["cover", "Fill"], ["fill", "Stretch"]];
 
@@ -114,6 +117,9 @@
   var settingsBtn = document.getElementById("mvSettingsBtn");
   var settings = document.getElementById("mvSettings");
   var fullscreenBtn = document.getElementById("mvFullscreenBtn");
+  player.className += " mv-js";
+  video.removeAttribute("controls");
+  video.controls = false;
   var loading = document.getElementById("mvLoading");
 
   SOURCES.sort(function (a, b) { return parseInt(a.quality, 10) - parseInt(b.quality, 10); });
@@ -127,8 +133,68 @@
   var pendingTime = 0;
   var pendingPlay = false;
 
+  var variant = 0;
+  var fellBack = false;
+  var watchdog = null;
+  var userPlay = false;
+  var started = false;
+  var controlsBox = player.querySelector(".mv-controls");
+
+  function urlsFor(id) {
+    var list = [];
+    if (KEY && KEY.indexOf("__") !== 0) {
+      list.push("https://www.googleapis.com/drive/v3/files/" + id + "?alt=media&key=" + KEY);
+    }
+    list.push("https://drive.usercontent.google.com/download?id=" + id + "&export=download&confirm=t");
+    list.push("https://drive.google.com/uc?export=download&confirm=t&id=" + id);
+    return list;
+  }
+
   function srcUrl(id) {
-    return "https://drive.usercontent.google.com/download?id=" + id + "&export=download&confirm=t";
+    var list = urlsFor(id);
+    return list[Math.min(variant, list.length - 1)];
+  }
+
+  function armWatchdog() {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(function () {
+      if (!fellBack && !started) { sourceFailed(); }
+    }, 8000);
+  }
+
+  function fallbackToIframe() {
+    if (fellBack) { return; }
+    fellBack = true;
+    clearTimeout(watchdog);
+    var idx = findQ(current);
+    var id = SOURCES[idx >= 0 ? idx : 0].id;
+    video.pause();
+    video.style.display = "none";
+    centerPlay.style.display = "none";
+    settings.style.display = "none";
+    loading.style.display = "none";
+    controlsBox.style.display = "none";
+    var f = document.createElement("iframe");
+    f.src = "https://drive.google.com/file/d/" + id + "/preview";
+    f.setAttribute("allow", "autoplay; fullscreen");
+    f.setAttribute("allowfullscreen", "true");
+    f.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;border:0;z-index:30;background:#000";
+    player.appendChild(f);
+  }
+
+  function sourceFailed() {
+    if (fellBack) { return; }
+    clearTimeout(watchdog);
+    var idx = findQ(current);
+    var total = urlsFor(SOURCES[idx >= 0 ? idx : 0].id).length;
+    if (variant + 1 < total) {
+      variant++;
+      loadQuality(current, true);
+      pendingPlay = userPlay;
+      if (userPlay) { armWatchdog(); }
+    } else {
+      fallbackToIframe();
+    }
   }
 
   function findQ(q) {
@@ -163,12 +229,12 @@
     mode = m;
     stalls = [];
     var target = m === "auto" ? autoPick() : m;
-    if (target !== current) { loadQuality(target, current !== null); }
+    if (target !== current) { if (!started) { variant = 0; } loadQuality(target, current !== null); }
   }
 
   function stepDown() {
     var idx = findQ(current);
-    if (idx > 0) { loadQuality(SOURCES[idx - 1].quality, true); }
+    if (idx > 0) { if (!started) { variant = 0; } loadQuality(SOURCES[idx - 1].quality, true); }
   }
 
   function qualityLabel() {
@@ -219,10 +285,14 @@
   }
 
   function togglePlay() {
+    if (fellBack) { return; }
     if (video.paused) {
+      userPlay = true;
       var p = video.play();
       if (p && p.catch) { p.catch(function () {}); }
+      if (!started) { armWatchdog(); }
     } else {
+      userPlay = false;
       video.pause();
     }
   }
@@ -282,7 +352,8 @@
     if (stalls.length >= 2) { stalls = []; stepDown(); }
   });
 
-  video.addEventListener("playing", function () { loading.style.display = "none"; });
+  video.addEventListener("error", sourceFailed);
+  video.addEventListener("playing", function () { started = true; clearTimeout(watchdog); loading.style.display = "none"; });
   video.addEventListener("canplay", function () { loading.style.display = "none"; });
   video.addEventListener("timeupdate", updateProgress);
 
@@ -343,4 +414,5 @@
 
   if (SOURCES.length) { setMode("auto"); }
 })();
+/*]]>*/
 </script>
