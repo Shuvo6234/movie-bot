@@ -333,84 +333,92 @@ def _vcdn_direct_upload(path, title):
 
 def vcdn_upload(path, title):
     """
-    Upload to VCDN.
+    Upload a video to VCDN.
 
-    Primary route: current documented 3-step API on cdn.vcdn.me.
-    If Cloudflare blocks that route with Error 1010/403 browser-signature
-    filtering, automatically fall back to VCDN's REST upload endpoint on
-    api.vcdn.me/videos.
+    VCDN's public homepage currently documents the simple REST upload:
+        POST https://api.vcdn.me/videos
+        Authorization: Bearer <key>
+        multipart fields: file, title
+
+    We use that route first because it avoids the live upload-init validation
+    mismatch seen on cdn.vcdn.me. If the direct REST route is unavailable,
+    we fall back to the documented chunked route.
     """
     log(f"Uploading {os.path.basename(path)} to VCDN...")
 
+    file_size = os.path.getsize(path)
+    if file_size <= 0:
+        raise RuntimeError(f"VCDN upload file is empty: {path}")
+
+    # Primary: the REST endpoint shown on VCDN's current homepage.
     try:
-        # VCDN's live upload-init endpoint validates that the file size is
-        # present and greater than zero, even though the public quickstart
-        # does not currently show this field. Send the real byte size.
-        file_size = os.path.getsize(path)
-        if file_size <= 0:
-            raise RuntimeError(f"VCDN upload file is empty: {path}")
+        log(f"  VCDN file size: {file_size} bytes")
+        return _vcdn_direct_upload(path, title)
+    except Exception as direct_error:
+        log(f"  VCDN direct REST upload failed: {direct_error}")
 
-        init = _vcdn_json(
-            "POST",
-            "/api/v1/upload/init",
-            {
-                "filename": os.path.basename(path),
-                "title": title,
-                "size": file_size,
-            },
-        )
-        upload_id = init.get("upload_id")
-        if not upload_id:
-            raise RuntimeError(f"VCDN init did not return upload_id: {init}")
-
-        log(f"  VCDN upload id: {upload_id}")
-        _vcdn_upload_binary(upload_id, path)
-
-        complete = _vcdn_json(
-            "POST",
-            "/api/v1/upload/complete",
-            {"upload_id": upload_id},
-        )
-        video_id = complete.get("id")
-        embed_url = complete.get("embed_url")
-        playback_url = complete.get("playback_url")
-
-        if not embed_url:
-            if video_id:
-                embed_url = f"https://embed.vcdn.me/{video_id}"
-            else:
+        # Fallback: chunked API. The live endpoint requires a positive size.
+        try:
+            init = _vcdn_json(
+                "POST",
+                "/api/v1/upload/init",
+                {
+                    "filename": os.path.basename(path),
+                    "title": title,
+                    "size": file_size,
+                },
+            )
+            upload_id = init.get("upload_id")
+            if not upload_id:
                 raise RuntimeError(
-                    f"VCDN complete did not return video id/embed_url: {complete}"
+                    f"VCDN init did not return upload_id: {init}"
                 )
 
-        log("  VCDN video:", video_id or "unknown")
-        log("  VCDN embed:", embed_url)
-        if playback_url:
-            log("  VCDN HLS:", playback_url)
+            log(f"  VCDN chunk upload id: {upload_id}")
+            _vcdn_upload_binary(upload_id, path)
 
-        return {
-            "id": video_id,
-            "embed_url": embed_url,
-            "playback_url": playback_url,
-            "status": complete.get("status"),
-        }
-
-    except Exception as primary_error:
-        error_text = str(primary_error).lower()
-        cloudflare_block = (
-            "http 403" in error_text
-            and (
-                "1010" in error_text
-                or "browser_signature_banned" in error_text
-                or "access denied based on your browser" in error_text
+            complete = _vcdn_json(
+                "POST",
+                "/api/v1/upload/complete",
+                {"upload_id": upload_id},
             )
-        )
-        if not cloudflare_block:
-            raise
 
-        log("  VCDN cdn.vcdn.me was blocked by Cloudflare Error 1010.")
-        log("  Trying VCDN direct REST upload endpoint api.vcdn.me/videos...")
-        return _vcdn_direct_upload(path, title)
+            video_id = complete.get("id") or complete.get("video_id")
+            embed_url = (
+                complete.get("embed_url")
+                or complete.get("embedUrl")
+            )
+            playback_url = (
+                complete.get("playback_url")
+                or complete.get("playbackUrl")
+            )
+
+            if not embed_url and video_id:
+                embed_url = f"https://embed.vcdn.me/{video_id}"
+
+            if not video_id and not embed_url:
+                raise RuntimeError(
+                    f"VCDN complete returned no video id/embed_url: {complete}"
+                )
+
+            log("  VCDN video:", video_id or "unknown")
+            log("  VCDN embed:", embed_url or "unknown")
+            if playback_url:
+                log("  VCDN HLS:", playback_url)
+
+            return {
+                "id": video_id,
+                "embed_url": embed_url,
+                "playback_url": playback_url,
+                "status": complete.get("status"),
+            }
+
+        except Exception as chunk_error:
+            raise RuntimeError(
+                "VCDN upload failed using both upload methods.\n"
+                f"Direct REST error: {direct_error}\n"
+                f"Chunked API error: {chunk_error}"
+            ) from chunk_error
 
 
 # ---------- ffmpeg helpers ----------
