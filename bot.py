@@ -343,10 +343,21 @@ def vcdn_upload(path, title):
     log(f"Uploading {os.path.basename(path)} to VCDN...")
 
     try:
+        # VCDN's live upload-init endpoint validates that the file size is
+        # present and greater than zero, even though the public quickstart
+        # does not currently show this field. Send the real byte size.
+        file_size = os.path.getsize(path)
+        if file_size <= 0:
+            raise RuntimeError(f"VCDN upload file is empty: {path}")
+
         init = _vcdn_json(
             "POST",
             "/api/v1/upload/init",
-            {"filename": os.path.basename(path), "title": title},
+            {
+                "filename": os.path.basename(path),
+                "title": title,
+                "size": file_size,
+            },
         )
         upload_id = init.get("upload_id")
         if not upload_id:
