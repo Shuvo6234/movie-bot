@@ -412,25 +412,33 @@ TIMER_SCRIPT = """<script>
 
 # ---------- custom video player (lives in player.html, NOT in this file) ----------
 PLAYER_FILE = Path(__file__).with_name("player.html")
+# "drive"  = Google Drive's own player (works today, no extra account needed)
+# "custom" = our own player from player.html (needs a host that allows direct mp4 streaming)
+PLAYER_MODE = os.environ.get("PLAYER_MODE", "drive").strip().lower()
+DRIVE_API_KEY = os.environ.get("DRIVE_API_KEY", "").strip()   # optional, makes the custom player more reliable
 
 
 def render_player(player_id, title, outputs):
     """Reads player.html and fills the placeholders with plain .replace()
     (no f-string / .format), so braces and quotes in the player code never break Python."""
+    drive_iframe = (f'<iframe src="https://drive.google.com/file/d/{player_id}/preview" '
+                    'width="100%" height="420" allow="autoplay; fullscreen" allowfullscreen="true" '
+                    'style="border:0;max-width:100%"></iframe>')
+    if PLAYER_MODE != "custom":
+        return drive_iframe
     try:
         tpl = PLAYER_FILE.read_text(encoding="utf-8")
     except Exception as ex:  # noqa
-        log("  player.html not found, using default iframe:", ex)
-        return (f'<iframe src="https://drive.google.com/file/d/{player_id}/preview" '
-                'width="100%" height="420" allow="autoplay" allowfullscreen="true" '
-                'style="border:0;max-width:100%"></iframe>')
+        log("  player.html not found, using Drive player:", ex)
+        return drive_iframe
     # join everything into one line so Blogger never inserts <br> for line breaks
     tpl = " ".join(l.strip() for l in tpl.splitlines() if l.strip())
     sources = json.dumps([{"quality": f"{h}p", "id": fid} for h, fid, _ in outputs])
     log(f"  Custom player loaded from player.html ({len(tpl)} chars)")
     return (tpl.replace("__VIDEO_ID__", player_id)
                .replace("__TITLE__", html.escape(title))
-               .replace("__SOURCES_JSON__", sources))
+               .replace("__SOURCES_JSON__", sources)
+               .replace("__API_KEY__", DRIVE_API_KEY))
 
 
 def build_html(meta, thumb_id, shot_ids, outputs, fps, dur):
