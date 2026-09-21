@@ -187,17 +187,29 @@ def _vcdn_json(method, path, payload=None):
     return retry(request, tries=4)
 
 
-def _vcdn_upload_binary(upload_id, path):
+def _vcdn_upload_binary(upload_id, path, upload_url=None):
     """
-    Upload the video bytes to the documented /chunk endpoint without
-    loading the entire movie into RAM.
+    Upload the video bytes to VCDN without loading the entire movie into RAM.
+    If the init response provides an uploadUrl, use that exact URL.
     """
     file_size = os.path.getsize(path)
+    target = upload_url or f"https://{VCDN_API_HOST}/api/v1/upload/{upload_id}/chunk"
+
+    if target.startswith("https://"):
+        from urllib.parse import urlsplit
+        parsed = urlsplit(target)
+        target_host = parsed.netloc
+        target_path = parsed.path or "/"
+        if parsed.query:
+            target_path += "?" + parsed.query
+    else:
+        target_host = VCDN_API_HOST
+        target_path = target if target.startswith("/") else "/" + target
 
     def upload():
-        conn = http.client.HTTPSConnection(VCDN_API_HOST, timeout=1800)
+        conn = http.client.HTTPSConnection(target_host, timeout=1800)
         try:
-            conn.putrequest("POST", f"/api/v1/upload/{upload_id}/chunk")
+            conn.putrequest("POST", target_path)
             headers = _vcdn_auth_headers("application/octet-stream")
             headers["Content-Length"] = str(file_size)
             for key, value in headers.items():
@@ -357,6 +369,13 @@ def vcdn_upload(path, title):
     except Exception as direct_error:
         log(f"  VCDN direct REST upload failed: {direct_error}")
 
+        # A 413 from api.vcdn.me means that endpoint's request-size limit was
+        # exceeded. Do not retry the same large multipart request; use the
+        # chunked upload API instead.
+        direct_text = str(direct_error)
+        if "HTTP 413" in direct_text or "413 Request Entity Too Large" in direct_text:
+            log("  VCDN direct endpoint rejected the file as too large; switching to chunked upload.")
+
         # Fallback: chunked API. The live endpoint requires a positive size.
         try:
             init = _vcdn_json(
@@ -368,14 +387,19 @@ def vcdn_upload(path, title):
                     "size": file_size,
                 },
             )
-            upload_id = init.get("upload_id")
+            # The live VCDN endpoint currently returns camelCase fields
+            # (uploadId/uploadUrl), while the public docs show snake_case.
+            upload_id = init.get("upload_id") or init.get("uploadId")
+            upload_url = init.get("upload_url") or init.get("uploadUrl")
             if not upload_id:
                 raise RuntimeError(
-                    f"VCDN init did not return upload_id: {init}"
+                    f"VCDN init did not return upload_id/uploadId: {init}"
                 )
 
             log(f"  VCDN chunk upload id: {upload_id}")
-            _vcdn_upload_binary(upload_id, path)
+            if upload_url:
+                log(f"  VCDN chunk upload URL: {upload_url}")
+            _vcdn_upload_binary(upload_id, path, upload_url)
 
             complete = _vcdn_json(
                 "POST",
