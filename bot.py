@@ -1,3 +1,4 @@
+
 """
 Movie Bot: Drive video -> multi-resolution -> VCDN Watch Online
 + Google Drive downloads + screenshots + 9:16 thumbnail
@@ -455,10 +456,18 @@ def vcdn_upload(path, title):
                         or info.get("embedUrl")
                         or embed_url
                     )
+                    playback = info.get("playback") or {}
                     playback_url = (
                         info.get("playback_url")
                         or info.get("playbackUrl")
+                        or (playback.get("hls") if isinstance(playback, dict) else None)
                         or playback_url
+                    )
+                    embed_url = (
+                        info.get("embed_url")
+                        or info.get("embedUrl")
+                        or (playback.get("embed") if isinstance(playback, dict) else None)
+                        or embed_url
                     )
                     log(f"  VCDN processing status: {status}")
 
@@ -953,11 +962,18 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts += [f"<p>{p}</p>" for p in syn]
 
     parts.append(f"<h3>Watch {title} Online</h3>")
-    playback_url = vcdn.get("playback_url")
+    playback_url = (
+        vcdn.get("playback_url")
+        or vcdn.get("playbackUrl")
+        or ((vcdn.get("playback") or {}).get("hls")
+            if isinstance(vcdn.get("playback"), dict) else None)
+    )
     if not playback_url and vcdn.get("id"):
         playback_url = f"https://stream.vcdn.me/{vcdn['id']}/master.m3u8"
     if not playback_url:
-        raise RuntimeError("VCDN did not provide a usable HLS playback URL for the custom player.")
+        raise RuntimeError(
+            f"VCDN did not provide a usable HLS playback URL for the custom player: {vcdn}"
+        )
     parts.append(build_vcdn_player(playback_url, meta["title"]))
 
     if review:
@@ -1088,4 +1104,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
