@@ -401,10 +401,12 @@ def vcdn_upload(path, title):
                 log(f"  VCDN chunk upload URL: {upload_url}")
             _vcdn_upload_binary(upload_id, path, upload_url)
 
+            # The live VCDN API returns camelCase `uploadId` from /init
+            # and expects the same field name in /complete.
             complete = _vcdn_json(
                 "POST",
                 "/api/v1/upload/complete",
-                {"upload_id": upload_id},
+                {"uploadId": upload_id},
             )
 
             video_id = complete.get("id") or complete.get("video_id")
