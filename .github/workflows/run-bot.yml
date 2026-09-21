@@ -17,6 +17,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+
     env:
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -24,6 +25,8 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       BLOG_ID: ${{ secrets.BLOG_ID }}
       DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
+      VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
+
     steps:
       - uses: actions/checkout@v4
 
