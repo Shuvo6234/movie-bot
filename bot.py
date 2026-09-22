@@ -44,7 +44,6 @@ from pathlib import Path
 
 from google import genai
 from google.auth.transport.requests import Request
-from google.genai import types
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -69,10 +68,22 @@ STREAMTAPE_LOGIN = os.environ["STREAMTAPE_LOGIN"].strip()
 STREAMTAPE_KEY = os.environ["STREAMTAPE_KEY"].strip()
 STREAMTAPE_API_HOST = "api.streamtape.com"
 
+# Primary Gemini model
 GEMINI_MODEL = os.environ.get(
     "GEMINI_MODEL",
     "gemini-3.6-flash"
-)
+).strip()
+
+# Optional fallback models.
+# You can override this from GitHub Actions if needed.
+GEMINI_FALLBACK_MODELS = [
+    x.strip()
+    for x in os.environ.get(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-2.5-flash"
+    ).split(",")
+    if x.strip()
+]
 
 RESOLUTIONS = [
     int(x.strip())
@@ -134,6 +145,28 @@ VCDN_WAIT_SECONDS = int(
     )
 )
 
+# Gemini retry settings
+GEMINI_RETRY_ATTEMPTS = int(
+    os.environ.get(
+        "GEMINI_RETRY_ATTEMPTS",
+        "5"
+    )
+)
+
+GEMINI_RETRY_BASE_DELAY = int(
+    os.environ.get(
+        "GEMINI_RETRY_BASE_DELAY",
+        "8"
+    )
+)
+
+GEMINI_RETRY_MAX_DELAY = int(
+    os.environ.get(
+        "GEMINI_RETRY_MAX_DELAY",
+        "120"
+    )
+)
+
 WORK = Path("work")
 
 CRF = {
@@ -169,20 +202,25 @@ def retry(fn, attempts=5, delay=5):
     last_error = None
 
     for attempt in range(1, attempts + 1):
+
         try:
             return fn()
 
         except Exception as error:
+
             last_error = error
 
             if attempt >= attempts:
                 raise
 
             log(
-                f"Retry {attempt}/{attempts - 1}: {error}"
+                f"Retry {attempt}/{attempts - 1}: "
+                f"{error}"
             )
 
-            time.sleep(delay * attempt)
+            time.sleep(
+                delay * attempt
+            )
 
     raise last_error
 
@@ -192,8 +230,11 @@ def retry(fn, attempts=5, delay=5):
 # ============================================================
 
 def run_command(command, check=True):
+
     log(
-        "$ " + " ".join(map(str, command))
+        "$ " + " ".join(
+            map(str, command)
+        )
     )
 
     process = subprocess.run(
@@ -204,12 +245,17 @@ def run_command(command, check=True):
     )
 
     if process.stdout:
+
         print(
             process.stdout,
             flush=True
         )
 
-    if check and process.returncode != 0:
+    if (
+        check
+        and process.returncode != 0
+    ):
+
         raise RuntimeError(
             "Command failed with "
             f"exit code {process.returncode}"
@@ -223,6 +269,7 @@ def run_command(command, check=True):
 # ============================================================
 
 def google_credentials():
+
     credentials = Credentials(
         token=None,
         refresh_token=REFRESH_TOKEN,
@@ -232,12 +279,15 @@ def google_credentials():
         scopes=SCOPES
     )
 
-    credentials.refresh(Request())
+    credentials.refresh(
+        Request()
+    )
 
     return credentials
 
 
 def google_clients():
+
     credentials = google_credentials()
 
     drive = build(
@@ -260,6 +310,7 @@ def google_clients():
 # ============================================================
 
 def list_videos(drive):
+
     query = (
         f"'{INPUT_FOLDER}' in parents "
         "and trashed = false "
@@ -284,7 +335,10 @@ def list_videos(drive):
         .execute()
     )
 
-    return result.get("files", [])
+    return result.get(
+        "files",
+        []
+    )
 
 
 def download_drive_file(
@@ -292,6 +346,7 @@ def download_drive_file(
     file_id,
     destination
 ):
+
     log(
         "Downloading original from Google Drive: "
         f"{destination.name}"
@@ -299,10 +354,15 @@ def download_drive_file(
 
     request = (
         drive.files()
-        .get_media(fileId=file_id)
+        .get_media(
+            fileId=file_id
+        )
     )
 
-    with open(destination, "wb") as file_handle:
+    with open(
+        destination,
+        "wb"
+    ) as file_handle:
 
         downloader = MediaIoBaseDownload(
             file_handle,
@@ -319,6 +379,7 @@ def download_drive_file(
             )
 
             if status:
+
                 log(
                     "Drive download: "
                     f"{status.progress() * 100:.1f}%"
@@ -331,6 +392,7 @@ def delete_drive_file(
     drive,
     file_id
 ):
+
     log(
         "Deleting original Google Drive source..."
     )
@@ -338,7 +400,9 @@ def delete_drive_file(
     retry(
         lambda: (
             drive.files()
-            .delete(fileId=file_id)
+            .delete(
+                fileId=file_id
+            )
             .execute()
         ),
         attempts=5,
@@ -356,9 +420,14 @@ def delete_drive_file(
 # ============================================================
 
 def streamtape_result(data):
+
     result = data.get("result")
 
-    if isinstance(result, dict):
+    if isinstance(
+        result,
+        dict
+    ):
+
         return result
 
     return data
@@ -369,7 +438,10 @@ def streamtape_api(
     params=None,
     timeout=120
 ):
-    params = dict(params or {})
+
+    params = dict(
+        params or {}
+    )
 
     params["login"] = STREAMTAPE_LOGIN
     params["key"] = STREAMTAPE_KEY
@@ -404,6 +476,7 @@ def streamtape_api(
             if not (
                 200 <= response.status < 300
             ):
+
                 raise RuntimeError(
                     "Streamtape API HTTP "
                     f"{response.status}"
@@ -429,6 +502,7 @@ def streamtape_api(
         )
 
     try:
+
         data = json.loads(
             raw.decode("utf-8")
         )
@@ -440,13 +514,16 @@ def streamtape_api(
             f"invalid JSON: {error}"
         )
 
-    status = data.get("status")
+    status = data.get(
+        "status"
+    )
 
     if status is not None:
 
         try:
 
             if int(status) != 200:
+
                 raise RuntimeError(
                     "Streamtape API error: "
                     f"{data}"
@@ -465,7 +542,10 @@ def streamtape_upload_url():
     }
 
     if STREAMTAPE_FOLDER:
-        params["folder"] = STREAMTAPE_FOLDER
+
+        params["folder"] = (
+            STREAMTAPE_FOLDER
+        )
 
     data = streamtape_api(
         "/file/ul",
@@ -473,7 +553,9 @@ def streamtape_upload_url():
         timeout=120
     )
 
-    result = streamtape_result(data)
+    result = streamtape_result(
+        data
+    )
 
     upload_url = (
         result.get("url")
@@ -482,6 +564,7 @@ def streamtape_upload_url():
     )
 
     if not upload_url:
+
         raise RuntimeError(
             "Streamtape did not return "
             "an upload URL."
@@ -494,7 +577,10 @@ def streamtape_multipart_upload(
     upload_url,
     file_path
 ):
-    file_path = Path(file_path)
+
+    file_path = Path(
+        file_path
+    )
 
     boundary = (
         "----MovieBot"
@@ -523,6 +609,7 @@ def streamtape_multipart_upload(
     host = parsed.hostname
 
     if not host:
+
         raise RuntimeError(
             "Invalid Streamtape upload URL."
         )
@@ -532,11 +619,6 @@ def streamtape_multipart_upload(
         parsed.port or 443,
         timeout=STREAMTAPE_WAIT_SECONDS
     )
-
-    path = parsed.path or "/"
-
-    if parsed.query:
-        path += "?" + parsed.query
 
     file_size = file_path.stat().st_size
 
@@ -556,7 +638,12 @@ def streamtape_multipart_upload(
 
         connection.putrequest(
             "POST",
-            path
+            parsed.path
+            + (
+                "?" + parsed.query
+                if parsed.query
+                else ""
+            )
         )
 
         connection.putheader(
@@ -577,7 +664,9 @@ def streamtape_multipart_upload(
 
         connection.endheaders()
 
-        connection.send(header)
+        connection.send(
+            header
+        )
 
         sent = 0
         last_percent = -10
@@ -596,7 +685,9 @@ def streamtape_multipart_upload(
                 if not chunk:
                     break
 
-                connection.send(chunk)
+                connection.send(
+                    chunk
+                )
 
                 sent += len(chunk)
 
@@ -616,15 +707,20 @@ def streamtape_multipart_upload(
 
                     last_percent = percent
 
-        connection.send(footer)
+        connection.send(
+            footer
+        )
 
-        response = connection.getresponse()
+        response = (
+            connection.getresponse()
+        )
 
         body = response.read()
 
         if not (
             200 <= response.status < 300
         ):
+
             raise RuntimeError(
                 "Streamtape upload failed "
                 f"HTTP {response.status}: "
@@ -632,6 +728,7 @@ def streamtape_multipart_upload(
             )
 
         try:
+
             return json.loads(
                 body.decode(
                     "utf-8",
@@ -640,9 +737,11 @@ def streamtape_multipart_upload(
             )
 
         except Exception:
+
             return {}
 
     finally:
+
         connection.close()
 
 
@@ -651,7 +750,10 @@ def streamtape_list_folder():
     params = {}
 
     if STREAMTAPE_FOLDER:
-        params["folder"] = STREAMTAPE_FOLDER
+
+        params["folder"] = (
+            STREAMTAPE_FOLDER
+        )
 
     data = streamtape_api(
         "/file/listfolder",
@@ -659,13 +761,19 @@ def streamtape_list_folder():
         timeout=120
     )
 
-    result = streamtape_result(data)
+    result = streamtape_result(
+        data
+    )
 
-    if isinstance(result, dict):
-        return result.get(
-            "files",
-            []
-        ) or []
+    if isinstance(
+        result,
+        dict
+    ):
+
+        return (
+            result.get("files", [])
+            or []
+        )
 
     return []
 
@@ -677,12 +785,22 @@ def streamtape_running_converts():
         timeout=120
     )
 
-    result = streamtape_result(data)
+    result = streamtape_result(
+        data
+    )
 
-    if isinstance(result, list):
+    if isinstance(
+        result,
+        list
+    ):
+
         return result
 
-    if isinstance(result, dict):
+    if isinstance(
+        result,
+        dict
+    ):
+
         return (
             result.get("files")
             or result.get("converts")
@@ -711,10 +829,16 @@ def streamtape_stable_link(item):
     )
 
     if link:
+
         return str(link)
 
-    linkid = item.get("linkid")
-    name = item.get("name")
+    linkid = item.get(
+        "linkid"
+    )
+
+    name = item.get(
+        "name"
+    )
 
     if linkid and name:
 
@@ -731,9 +855,12 @@ def streamtape_find_existing(
     name,
     size
 ):
+
     try:
 
-        files = streamtape_list_folder()
+        files = (
+            streamtape_list_folder()
+        )
 
     except Exception as error:
 
@@ -749,15 +876,19 @@ def streamtape_find_existing(
         if str(
             item.get("name", "")
         ) != name:
+
             continue
 
-        item_size = item.get("size")
+        item_size = item.get(
+            "size"
+        )
 
         if item_size is not None:
 
             try:
 
                 if int(item_size) != int(size):
+
                     continue
 
             except Exception:
@@ -768,12 +899,18 @@ def streamtape_find_existing(
     return None
 
 
-def streamtape_is_converting(name):
+def streamtape_is_converting(
+    name
+):
 
     try:
-        converts = streamtape_running_converts()
+
+        converts = (
+            streamtape_running_converts()
+        )
 
     except Exception:
+
         return False
 
     for item in converts:
@@ -783,6 +920,7 @@ def streamtape_is_converting(name):
         )
 
         if item_name != name:
+
             continue
 
         status = str(
@@ -796,15 +934,19 @@ def streamtape_is_converting(name):
             "completed",
             "success"
         }:
+
             return False
 
-        progress = item.get("progress")
+        progress = item.get(
+            "progress"
+        )
 
         if progress is not None:
 
             try:
 
                 if float(progress) >= 100:
+
                     return False
 
             except Exception:
@@ -819,6 +961,7 @@ def streamtape_wait_ready(
     name,
     size
 ):
+
     deadline = (
         time.time()
         + STREAMTAPE_WAIT_SECONDS
@@ -835,13 +978,24 @@ def streamtape_wait_ready(
 
         if item:
 
-            link = streamtape_stable_link(
-                item
+            link = (
+                streamtape_stable_link(
+                    item
+                )
             )
 
-            if link and not streamtape_is_converting(name):
+            if (
+                link
+                and not streamtape_is_converting(
+                    name
+                )
+            ):
 
-                file_id = streamtape_file_id(item)
+                file_id = (
+                    streamtape_file_id(
+                        item
+                    )
+                )
 
                 log(
                     "Streamtape ready: "
@@ -875,22 +1029,30 @@ def streamtape_wait_ready(
     )
 
 
-def streamtape_upload_and_wait(file_path):
+def streamtape_upload_and_wait(
+    file_path
+):
 
-    file_path = Path(file_path)
+    file_path = Path(
+        file_path
+    )
 
     name = file_path.name
     size = file_path.stat().st_size
 
-    existing = streamtape_find_existing(
-        name,
-        size
+    existing = (
+        streamtape_find_existing(
+            name,
+            size
+        )
     )
 
     if existing:
 
-        link = streamtape_stable_link(
-            existing
+        link = (
+            streamtape_stable_link(
+                existing
+            )
         )
 
         if link:
@@ -942,6 +1104,7 @@ def vcdn_json(
     body=None,
     timeout=120
 ):
+
     url = (
         f"https://{VCDN_API_HOST}"
         f"{path}"
@@ -956,6 +1119,7 @@ def vcdn_json(
     data = None
 
     if body is not None:
+
         data = json.dumps(
             body
         ).encode("utf-8")
@@ -977,11 +1141,13 @@ def vcdn_json(
             raw = response.read()
 
             if not raw:
+
                 return {}
 
             if not (
                 200 <= response.status < 300
             ):
+
                 raise RuntimeError(
                     "VCDN HTTP "
                     f"{response.status}: "
@@ -1009,9 +1175,13 @@ def vcdn_json(
         )
 
 
-def vcdn_direct_upload(file_path):
+def vcdn_direct_upload(
+    file_path
+):
 
-    file_path = Path(file_path)
+    file_path = Path(
+        file_path
+    )
 
     boundary = (
         "----MovieBotVCDN"
@@ -1053,7 +1223,9 @@ def vcdn_direct_upload(file_path):
             "/videos"
         )
 
-        for key, value in vcdn_headers().items():
+        for key, value in (
+            vcdn_headers().items()
+        ):
 
             connection.putheader(
                 key,
@@ -1073,7 +1245,9 @@ def vcdn_direct_upload(file_path):
 
         connection.endheaders()
 
-        connection.send(header)
+        connection.send(
+            header
+        )
 
         with open(
             file_path,
@@ -1089,17 +1263,24 @@ def vcdn_direct_upload(file_path):
                 if not chunk:
                     break
 
-                connection.send(chunk)
+                connection.send(
+                    chunk
+                )
 
-        connection.send(footer)
+        connection.send(
+            footer
+        )
 
-        response = connection.getresponse()
+        response = (
+            connection.getresponse()
+        )
 
         body = response.read()
 
         if not (
             200 <= response.status < 300
         ):
+
             raise RuntimeError(
                 "VCDN direct upload HTTP "
                 f"{response.status}: "
@@ -1111,6 +1292,7 @@ def vcdn_direct_upload(file_path):
         )
 
     finally:
+
         connection.close()
 
 
@@ -1119,7 +1301,10 @@ def vcdn_upload_binary(
     upload_id,
     file_path
 ):
-    file_path = Path(file_path)
+
+    file_path = Path(
+        file_path
+    )
 
     parsed = urllib.parse.urlsplit(
         upload_url
@@ -1128,6 +1313,7 @@ def vcdn_upload_binary(
     host = parsed.hostname
 
     if not host:
+
         raise RuntimeError(
             "Invalid VCDN upload URL."
         )
@@ -1135,7 +1321,10 @@ def vcdn_upload_binary(
     path = parsed.path or "/"
 
     if parsed.query:
-        path += "?" + parsed.query
+
+        path += (
+            "?" + parsed.query
+        )
 
     size = file_path.stat().st_size
 
@@ -1152,7 +1341,9 @@ def vcdn_upload_binary(
             path
         )
 
-        for key, value in vcdn_headers().items():
+        for key, value in (
+            vcdn_headers().items()
+        ):
 
             connection.putheader(
                 key,
@@ -1170,6 +1361,7 @@ def vcdn_upload_binary(
         )
 
         if upload_id:
+
             connection.putheader(
                 "X-Upload-ID",
                 str(upload_id)
@@ -1194,7 +1386,9 @@ def vcdn_upload_binary(
                 if not chunk:
                     break
 
-                connection.send(chunk)
+                connection.send(
+                    chunk
+                )
 
                 sent += len(chunk)
 
@@ -1214,13 +1408,16 @@ def vcdn_upload_binary(
 
                     last_percent = percent
 
-        response = connection.getresponse()
+        response = (
+            connection.getresponse()
+        )
 
         body = response.read()
 
         if not (
             200 <= response.status < 300
         ):
+
             raise RuntimeError(
                 "VCDN binary upload failed "
                 f"HTTP {response.status}: "
@@ -1230,27 +1427,42 @@ def vcdn_upload_binary(
         return body
 
     finally:
+
         connection.close()
 
 
-def vcdn_value(data, *keys):
+def vcdn_value(
+    data,
+    *keys
+):
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict
+    ):
+
         return None
 
     for key in keys:
 
-        value = data.get(key)
+        value = data.get(
+            key
+        )
 
         if value:
+
             return value
 
     return None
 
 
-def vcdn_chunked_upload(file_path):
+def vcdn_chunked_upload(
+    file_path
+):
 
-    file_path = Path(file_path)
+    file_path = Path(
+        file_path
+    )
 
     init = vcdn_json(
         "POST",
@@ -1263,9 +1475,15 @@ def vcdn_chunked_upload(file_path):
         }
     )
 
-    data = init.get("data")
+    data = init.get(
+        "data"
+    )
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict
+    ):
+
         data = {}
 
     video_id = (
@@ -1313,6 +1531,7 @@ def vcdn_chunked_upload(file_path):
     )
 
     if not video_id:
+
         raise RuntimeError(
             "VCDN init did not return "
             f"a video ID: {init}"
@@ -1359,7 +1578,11 @@ def vcdn_extract_embed(
     video_id
 ):
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict
+    ):
+
         data = {}
 
     embed = (
@@ -1369,19 +1592,34 @@ def vcdn_extract_embed(
     )
 
     if embed:
+
         return str(embed)
 
-    data_section = data.get("data")
+    data_section = data.get(
+        "data"
+    )
 
-    if isinstance(data_section, dict):
+    if isinstance(
+        data_section,
+        dict
+    ):
 
         embed = (
-            data_section.get("embed_url")
-            or data_section.get("embedUrl")
-            or data_section.get("embed")
+            data_section.get(
+                "embed_url"
+            )
+            or
+            data_section.get(
+                "embedUrl"
+            )
+            or
+            data_section.get(
+                "embed"
+            )
         )
 
         if embed:
+
             return str(embed)
 
     return (
@@ -1390,9 +1628,13 @@ def vcdn_extract_embed(
     )
 
 
-def vcdn_upload(file_path):
+def vcdn_upload(
+    file_path
+):
 
-    file_path = Path(file_path)
+    file_path = Path(
+        file_path
+    )
 
     log(
         "Uploading highest quality to VCDN: "
@@ -1413,7 +1655,10 @@ def vcdn_upload(file_path):
             direct.get("result"),
             dict
         ):
-            direct_data = direct["result"]
+
+            direct_data = (
+                direct["result"]
+            )
 
         video_id = (
             vcdn_value(
@@ -1432,6 +1677,7 @@ def vcdn_upload(file_path):
         )
 
         if not video_id:
+
             raise RuntimeError(
                 "VCDN direct upload returned "
                 "no video ID."
@@ -1476,18 +1722,26 @@ def vcdn_upload(file_path):
 
         status = ""
 
-        if isinstance(latest, dict):
+        if isinstance(
+            latest,
+            dict
+        ):
 
             status = str(
                 latest.get("status", "")
                 or latest.get("state", "")
             ).lower()
 
-            nested = latest.get("data")
+            nested = latest.get(
+                "data"
+            )
 
             if (
                 not status
-                and isinstance(nested, dict)
+                and isinstance(
+                    nested,
+                    dict
+                )
             ):
 
                 status = str(
@@ -1507,6 +1761,7 @@ def vcdn_upload(file_path):
             "published",
             "success"
         }:
+
             break
 
         if status in {
@@ -1514,6 +1769,7 @@ def vcdn_upload(file_path):
             "error",
             "cancelled"
         }:
+
             raise RuntimeError(
                 "VCDN processing failed: "
                 f"{latest}"
@@ -1522,6 +1778,7 @@ def vcdn_upload(file_path):
         time.sleep(10)
 
     else:
+
         raise TimeoutError(
             "VCDN processing timed out."
         )
@@ -1550,24 +1807,39 @@ def vcdn_upload(file_path):
 def parse_fps(value):
 
     if not value:
+
         return 30.0
 
-    value = str(value)
+    value = str(
+        value
+    )
 
     if "/" in value:
 
-        a, b = value.split("/", 1)
+        a, b = value.split(
+            "/",
+            1
+        )
 
         try:
-            return float(a) / float(b)
+
+            return (
+                float(a)
+                / float(b)
+            )
 
         except Exception:
+
             return 30.0
 
     try:
-        return float(value)
+
+        return float(
+            value
+        )
 
     except Exception:
+
         return 30.0
 
 
@@ -1597,7 +1869,9 @@ def probe(path):
         ]
     )
 
-    data = json.loads(output)
+    data = json.loads(
+        output
+    )
 
     duration = float(
         data.get(
@@ -1616,29 +1890,45 @@ def probe(path):
         []
     ):
 
-        if stream.get("codec_type") == "video":
+        if (
+            stream.get("codec_type")
+            == "video"
+        ):
 
             video_stream = stream
             break
 
     if not video_stream:
+
         raise RuntimeError(
             "No video stream found."
         )
 
     width = int(
-        video_stream.get("width") or 0
+        video_stream.get(
+            "width"
+        )
+        or 0
     )
 
     height = int(
-        video_stream.get("height") or 0
+        video_stream.get(
+            "height"
+        )
+        or 0
     )
 
     fps = parse_fps(
-        video_stream.get("r_frame_rate")
+        video_stream.get(
+            "r_frame_rate"
+        )
     )
 
-    if width <= 0 or height <= 0:
+    if (
+        width <= 0
+        or height <= 0
+    ):
+
         raise RuntimeError(
             "Could not determine "
             "video dimensions."
@@ -1659,7 +1949,9 @@ def transcode(
     source_fps
 ):
 
-    output = Path(output)
+    output = Path(
+        output
+    )
 
     output.parent.mkdir(
         parents=True,
@@ -1713,13 +2005,17 @@ def transcode(
     )
 
     if not output.exists():
+
         raise RuntimeError(
-            f"FFmpeg output missing: {output}"
+            f"FFmpeg output missing: "
+            f"{output}"
         )
 
     if output.stat().st_size <= 0:
+
         raise RuntimeError(
-            f"FFmpeg output is empty: {output}"
+            f"FFmpeg output is empty: "
+            f"{output}"
         )
 
     return output
@@ -1744,7 +2040,10 @@ def target_resolutions(
     )
 
     if not targets:
-        targets = [short_side]
+
+        targets = [
+            short_side
+        ]
 
     return targets
 
@@ -1772,6 +2071,7 @@ FALLBACK_LABELS = [
 def parse_labels(text):
 
     if not text:
+
         return []
 
     parts = re.split(
@@ -1798,35 +2098,355 @@ def parse_labels(text):
             part
             and part not in labels
         ):
-            labels.append(part)
+
+            labels.append(
+                part
+            )
 
     return labels
 
 
 def pick_labels(labels):
 
-    if isinstance(labels, list):
+    if isinstance(
+        labels,
+        list
+    ):
 
         labels = ",".join(
             map(str, labels)
         )
 
-    labels = parse_labels(labels)
+    labels = parse_labels(
+        labels
+    )
 
     result = []
 
     for label in labels:
 
         if label.lower() == "uncategorized":
+
             continue
 
         if label not in result:
-            result.append(label)
+
+            result.append(
+                label
+            )
 
     if not result:
+
         result = FALLBACK_LABELS[:3]
 
     return result[:8]
+
+
+def gemini_temporary_error(
+    error
+):
+    """
+    Detect errors where retrying makes sense.
+
+    Handles:
+    429
+    500
+    502
+    503
+    504
+    timeout-related failures
+    """
+
+    text = str(
+        error
+    ).upper()
+
+    markers = [
+        "429",
+        "RESOURCE_EXHAUSTED",
+
+        "500",
+        "INTERNAL",
+
+        "502",
+        "BAD GATEWAY",
+
+        "503",
+        "UNAVAILABLE",
+
+        "504",
+        "DEADLINE",
+
+        "TIMEOUT",
+        "TIMED OUT",
+
+        "SERVICE UNAVAILABLE",
+    ]
+
+    return any(
+        marker in text
+        for marker in markers
+    )
+
+
+def clean_gemini_json(
+    text
+):
+
+    if not text:
+
+        raise RuntimeError(
+            "Gemini returned an empty response."
+        )
+
+    text = str(
+        text
+    ).strip()
+
+    # Remove markdown fences.
+    text = re.sub(
+        r"^```json\s*",
+        "",
+        text,
+        flags=re.I
+    )
+
+    text = re.sub(
+        r"^```\s*",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"\s*```$",
+        "",
+        text
+    )
+
+    text = text.strip()
+
+    # Find the JSON object.
+    start = text.find(
+        "{"
+    )
+
+    end = text.rfind(
+        "}"
+    )
+
+    if (
+        start == -1
+        or end == -1
+        or end <= start
+    ):
+
+        raise RuntimeError(
+            "Gemini did not return "
+            "a valid JSON object."
+        )
+
+    json_text = (
+        text[start:end + 1]
+    )
+
+    return json.loads(
+        json_text
+    )
+
+
+def fallback_movie_title(
+    movie_name
+):
+
+    # Remove extension.
+    title = Path(
+        movie_name
+    ).stem
+
+    # Remove common quality markers.
+    title = re.sub(
+        r"[^)]*(?:2160P|1080P|720P|480P|HD|FHD|UHD)[^)]*",
+        "",
+        title,
+        flags=re.I
+    )
+
+    title = re.sub(
+        r"\b(?:2160P|1080P|720P|480P|HD|FHD|UHD)\b",
+        "",
+        title,
+        flags=re.I
+    )
+
+    # Replace separators.
+    title = title.replace(
+        "_",
+        " "
+    )
+
+    title = re.sub(
+        r"\s+",
+        " ",
+        title
+    ).strip()
+
+    return title or "Movie"
+
+
+def fallback_movie_metadata(
+    movie_name,
+    duration
+):
+
+    title = fallback_movie_title(
+        movie_name
+    )
+
+    runtime = fmt_runtime(
+        duration
+    )
+
+    return {
+        "title": title,
+
+        "description": (
+            f"Watch {title} online and "
+            "choose from the available "
+            "download quality options."
+        ),
+
+        "review": (
+            f"{title} is available for "
+            f"online viewing and download. "
+            f"Runtime: {runtime}."
+        ),
+
+        "themes": (
+            "Movie, Entertainment"
+        ),
+
+        "labels": [
+            "Movie",
+            "Entertainment",
+            "HD"
+        ]
+    }
+
+
+def gemini_generate_with_retry(
+    gemini,
+    model,
+    prompt
+):
+
+    last_error = None
+
+    for attempt in range(
+        1,
+        GEMINI_RETRY_ATTEMPTS + 1
+    ):
+
+        try:
+
+            log(
+                "Gemini request: "
+                f"model={model}, "
+                f"attempt={attempt}/"
+                f"{GEMINI_RETRY_ATTEMPTS}"
+            )
+
+            # IMPORTANT:
+            # Simple contents=prompt is intentional.
+            # It avoids the AFC warning from the previous
+            # implementation.
+            response = (
+                gemini.models.generate_content(
+                    model=model,
+                    contents=prompt
+                )
+            )
+
+            if response is None:
+
+                raise RuntimeError(
+                    "Gemini returned an empty "
+                    "response object."
+                )
+
+            response_text = getattr(
+                response,
+                "text",
+                None
+            )
+
+            if not response_text:
+
+                raise RuntimeError(
+                    "Gemini returned a response "
+                    "without text."
+                )
+
+            log(
+                "Gemini request succeeded: "
+                f"attempt {attempt}"
+            )
+
+            return response_text
+
+        except Exception as error:
+
+            last_error = error
+
+            log(
+                "Gemini request failed: "
+                f"{error}"
+            )
+
+            # Non-temporary error.
+            if not gemini_temporary_error(
+                error
+            ):
+
+                log(
+                    "This Gemini error is not "
+                    "considered temporary."
+                )
+
+                raise
+
+            if (
+                attempt
+                >= GEMINI_RETRY_ATTEMPTS
+            ):
+
+                break
+
+            delay = min(
+                GEMINI_RETRY_BASE_DELAY
+                * (2 ** (attempt - 1)),
+                GEMINI_RETRY_MAX_DELAY
+            )
+
+            log(
+                "Temporary Gemini error "
+                "detected."
+            )
+
+            log(
+                f"Waiting {delay}s "
+                "before retry..."
+            )
+
+            time.sleep(
+                delay
+            )
+
+    raise RuntimeError(
+        "Gemini remained unavailable "
+        f"after {GEMINI_RETRY_ATTEMPTS} "
+        f"attempts. Last error: "
+        f"{last_error}"
+    )
 
 
 def analyze(
@@ -1842,10 +2462,10 @@ Movie filename:
 {movie_name}
 
 Language hint:
-{LANGUAGE_HINT}
+{LANGUAGE_HINT or "English"}
 
 Director hint:
-{DIRECTOR_NAME}
+{DIRECTOR_NAME or "Not provided"}
 
 Duration:
 {duration:.1f} seconds
@@ -1865,111 +2485,223 @@ Required format:
 Rules:
 
 - Create a clean movie title.
+- Do not include resolution such as 480p, 720p or 1080p.
 - Do not invent cast information.
 - Do not invent ratings.
 - Do not invent unsupported facts.
 - Description should be useful for a movie website.
 - Review should be neutral and concise.
+- Review must not contain major spoilers.
 - Themes should be concise.
-- Labels should be simple genres/topics.
+- Labels should be simple movie genres/topics.
+- Return JSON only.
 """
 
-    response = (
-        gemini.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_text(
-                            text=prompt
-                        )
-                    ]
+    # --------------------------------------------------------
+    # Build model list.
+    # --------------------------------------------------------
+
+    models = []
+
+    if GEMINI_MODEL:
+
+        models.append(
+            GEMINI_MODEL
+        )
+
+    for model in (
+        GEMINI_FALLBACK_MODELS
+    ):
+
+        if (
+            model
+            and model not in models
+        ):
+
+            models.append(
+                model
+            )
+
+    # --------------------------------------------------------
+    # Try primary + fallback models.
+    # --------------------------------------------------------
+
+    last_error = None
+
+    for index, model in enumerate(
+        models,
+        start=1
+    ):
+
+        log("=" * 70)
+
+        log(
+            "Gemini metadata model "
+            f"{index}/{len(models)}: "
+            f"{model}"
+        )
+
+        try:
+
+            raw_text = (
+                gemini_generate_with_retry(
+                    gemini,
+                    model,
+                    prompt
                 )
-            ]
-        )
-    )
-
-    text = (
-        response.text or ""
-    ).strip()
-
-    text = re.sub(
-        r"^```json\s*",
-        "",
-        text,
-        flags=re.I
-    )
-
-    text = re.sub(
-        r"^```\s*",
-        "",
-        text
-    )
-
-    text = re.sub(
-        r"\s*```$",
-        "",
-        text
-    ).strip()
-
-    match = re.search(
-        r"\{.*\}",
-        text,
-        re.S
-    )
-
-    if not match:
-        raise RuntimeError(
-            "Gemini did not return "
-            "valid JSON."
-        )
-
-    data = json.loads(
-        match.group(0)
-    )
-
-    title = str(
-        data.get(
-            "title",
-            movie_name
-        )
-    ).strip()
-
-    if not title:
-        title = movie_name
-
-    return {
-        "title": title,
-
-        "description": str(
-            data.get(
-                "description",
-                ""
             )
-        ).strip(),
 
-        "review": str(
-            data.get(
-                "review",
-                ""
+            data = clean_gemini_json(
+                raw_text
             )
-        ).strip(),
 
-        "themes": str(
-            data.get(
-                "themes",
-                ""
-            )
-        ).strip(),
+            if not isinstance(
+                data,
+                dict
+            ):
 
-        "labels": pick_labels(
-            data.get(
-                "labels",
-                []
+                raise RuntimeError(
+                    "Gemini JSON response "
+                    "is not an object."
+                )
+
+            title = str(
+                data.get(
+                    "title",
+                    ""
+                )
+            ).strip()
+
+            if not title:
+
+                title = fallback_movie_title(
+                    movie_name
+                )
+
+            description = str(
+                data.get(
+                    "description",
+                    ""
+                )
+            ).strip()
+
+            review = str(
+                data.get(
+                    "review",
+                    ""
+                )
+            ).strip()
+
+            themes = str(
+                data.get(
+                    "themes",
+                    ""
+                )
+            ).strip()
+
+            labels = pick_labels(
+                data.get(
+                    "labels",
+                    []
+                )
             )
+
+            # If Gemini omitted a field, provide safe fallback.
+            if not description:
+
+                description = (
+                    f"Watch {title} online "
+                    "and choose from the "
+                    "available download "
+                    "quality options."
+                )
+
+            if not review:
+
+                review = (
+                    f"{title} is available "
+                    "for online viewing and "
+                    "download."
+                )
+
+            if not themes:
+
+                themes = (
+                    "Movie, Entertainment"
+                )
+
+            result = {
+                "title": title,
+                "description": description,
+                "review": review,
+                "themes": themes,
+                "labels": labels
+            }
+
+            log(
+                "Gemini metadata parsed "
+                "successfully."
+            )
+
+            log(
+                f"Generated title: {title}"
+            )
+
+            log(
+                "Labels: "
+                + ", ".join(labels)
+            )
+
+            return result
+
+        except Exception as error:
+
+            last_error = error
+
+            log(
+                f"Gemini model {model} failed: "
+                f"{error}"
+            )
+
+            if index < len(models):
+
+                log(
+                    "Trying next Gemini "
+                    f"model: {models[index]}"
+                )
+
+    # --------------------------------------------------------
+    # FINAL LOCAL FALLBACK
+    # --------------------------------------------------------
+
+    log("=" * 70)
+
+    log(
+        "ALL GEMINI MODELS FAILED."
+    )
+
+    if last_error:
+
+        log(
+            f"Last Gemini error: "
+            f"{last_error}"
         )
-    }
+
+    log(
+        "Using local fallback metadata."
+    )
+
+    fallback = fallback_movie_metadata(
+        movie_name,
+        duration
+    )
+
+    log(
+        f"Fallback title: "
+        f"{fallback['title']}"
+    )
+
+    return fallback
 
 
 # ============================================================
@@ -1978,7 +2710,9 @@ Rules:
 
 def human(size):
 
-    size = float(size)
+    size = float(
+        size
+    )
 
     units = [
         "B",
@@ -1991,24 +2725,38 @@ def human(size):
     for unit in units:
 
         if size < 1024:
-            return f"{size:.1f} {unit}"
+
+            return (
+                f"{size:.1f} "
+                f"{unit}"
+            )
 
         size /= 1024
 
-    return f"{size:.1f} PB"
+    return (
+        f"{size:.1f} PB"
+    )
 
 
-def fmt_runtime(seconds):
+def fmt_runtime(
+    seconds
+):
 
-    seconds = int(seconds)
+    seconds = int(
+        seconds
+    )
 
-    hours = seconds // 3600
+    hours = (
+        seconds // 3600
+    )
 
     minutes = (
         seconds % 3600
     ) // 60
 
-    secs = seconds % 60
+    secs = (
+        seconds % 60
+    )
 
     if hours:
 
@@ -2024,9 +2772,12 @@ def fmt_runtime(seconds):
     )
 
 
-def as_paragraphs(text):
+def as_paragraphs(
+    text
+):
 
     if not text:
+
         return ""
 
     paragraphs = re.split(
@@ -2051,7 +2802,9 @@ def as_paragraphs(text):
 # DOWNLOAD TIMER
 # ============================================================
 
-def TIMER_SCRIPT(wait_seconds):
+def TIMER_SCRIPT(
+    wait_seconds
+):
 
     return f"""
 <script>
@@ -2165,7 +2918,9 @@ def build_html(
         )
     )
 
-    runtime = fmt_runtime(duration)
+    runtime = fmt_runtime(
+        duration
+    )
 
     labels = meta.get(
         "labels",
@@ -2193,7 +2948,9 @@ Runtime: {runtime}
     )
 
     embed_url = html.escape(
-        str(vcdn["embed"]),
+        str(
+            vcdn["embed"]
+        ),
         quote=True
     )
 
@@ -2277,7 +3034,9 @@ border:1px solid #333;
     for resolution, streamtape, size in outputs:
 
         stream_url = html.escape(
-            str(streamtape["link"]),
+            str(
+                streamtape["link"]
+            ),
             quote=True
         )
 
@@ -2315,7 +3074,9 @@ Download {resolution}p
         labels_html = " ".join(
             (
                 "<span>"
-                + html.escape(str(label))
+                + html.escape(
+                    str(label)
+                )
                 + "</span>"
             )
             for label in labels
@@ -2334,17 +3095,23 @@ Download {resolution}p
         )
 
     parts.append(
-        TIMER_SCRIPT(WAIT_SECONDS)
+        TIMER_SCRIPT(
+            WAIT_SECONDS
+        )
     )
 
-    return "\n".join(parts)
+    return "\n".join(
+        parts
+    )
 
 
 # ============================================================
 # BLOGGER
 # ============================================================
 
-def verify_blogger_access(blogger):
+def verify_blogger_access(
+    blogger
+):
 
     log(
         "Checking Blogger blog access..."
@@ -2369,10 +3136,15 @@ def verify_blogger_access(blogger):
         )
 
     returned_id = str(
-        blog.get("id", "")
+        blog.get(
+            "id",
+            ""
+        )
     )
 
-    if returned_id != str(BLOG_ID):
+    if returned_id != str(
+        BLOG_ID
+    ):
 
         raise RuntimeError(
             "Blogger returned a different "
@@ -2444,13 +3216,23 @@ def create_blogger_post(
             "BLOGGER INSERT FAILED:"
         )
 
-        log(str(error))
+        log(
+            str(error)
+        )
 
         raise
 
-    post_id = result.get("id")
-    post_url = result.get("url")
-    status = result.get("status")
+    post_id = result.get(
+        "id"
+    )
+
+    post_url = result.get(
+        "url"
+    )
+
+    status = result.get(
+        "status"
+    )
 
     log(
         "BLOGGER INSERT RESPONSE:"
@@ -2487,7 +3269,10 @@ def create_blogger_post(
 
     verify_error = None
 
-    for attempt in range(1, 6):
+    for attempt in range(
+        1,
+        6
+    ):
 
         try:
 
@@ -2495,7 +3280,9 @@ def create_blogger_post(
                 blogger.posts()
                 .get(
                     blogId=BLOG_ID,
-                    postId=str(post_id),
+                    postId=str(
+                        post_id
+                    ),
                     fetchBody=False
                 )
                 .execute()
@@ -2514,7 +3301,10 @@ def create_blogger_post(
             )
 
             if attempt < 5:
-                time.sleep(3)
+
+                time.sleep(
+                    3
+                )
 
     if not verified:
 
@@ -2524,9 +3314,15 @@ def create_blogger_post(
             f"Last error: {verify_error}"
         )
 
-    verified_id = verified.get("id")
+    verified_id = verified.get(
+        "id"
+    )
 
-    if str(verified_id) != str(post_id):
+    if str(
+        verified_id
+    ) != str(
+        post_id
+    ):
 
         raise RuntimeError(
             "Blogger verification returned "
@@ -2584,8 +3380,13 @@ def process_movie(
     gemini
 ):
 
-    file_id = file_info["id"]
-    original_name = file_info["name"]
+    file_id = file_info[
+        "id"
+    ]
+
+    original_name = file_info[
+        "name"
+    ]
 
     log("=" * 70)
 
@@ -2601,17 +3402,24 @@ def process_movie(
         f"Drive file ID: {file_id}"
     )
 
+    safe_work_name = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        Path(
+            original_name
+        ).stem
+    )
+
     movie_work = (
         WORK
-        / re.sub(
-            r"[^A-Za-z0-9._-]+",
-            "_",
-            Path(original_name).stem
-        )
+        / safe_work_name
     )
 
     if movie_work.exists():
-        shutil.rmtree(movie_work)
+
+        shutil.rmtree(
+            movie_work
+        )
 
     movie_work.mkdir(
         parents=True,
@@ -2625,9 +3433,9 @@ def process_movie(
 
     try:
 
-        # ----------------------------------------------------
+        # ====================================================
         # 1. DOWNLOAD SOURCE
-        # ----------------------------------------------------
+        # ====================================================
 
         download_drive_file(
             drive,
@@ -2635,9 +3443,9 @@ def process_movie(
             source_path
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 2. PROBE
-        # ----------------------------------------------------
+        # ====================================================
 
         info = probe(
             source_path
@@ -2653,16 +3461,18 @@ def process_movie(
         )
 
         log(
-            f"FPS: {info['fps']}"
+            f"FPS: "
+            f"{info['fps']}"
         )
 
         log(
-            f"Duration: {info['duration']:.2f}s"
+            f"Duration: "
+            f"{info['duration']:.2f}s"
         )
 
-        # ----------------------------------------------------
-        # 3. RESOLUTIONS
-        # ----------------------------------------------------
+        # ====================================================
+        # 3. TARGET RESOLUTIONS
+        # ====================================================
 
         targets = target_resolutions(
             info["width"],
@@ -2677,9 +3487,9 @@ def process_movie(
             )
         )
 
-        # ----------------------------------------------------
-        # 4. GEMINI
-        # ----------------------------------------------------
+        # ====================================================
+        # 4. GEMINI METADATA
+        # ====================================================
 
         log(
             "Generating movie metadata..."
@@ -2692,17 +3502,20 @@ def process_movie(
         )
 
         log(
-            f"Generated title: {meta['title']}"
+            f"Generated title: "
+            f"{meta['title']}"
         )
 
         log(
             "Labels: "
-            + ", ".join(meta["labels"])
+            + ", ".join(
+                meta["labels"]
+            )
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 5. FFMPEG
-        # ----------------------------------------------------
+        # ====================================================
 
         outputs = []
 
@@ -2734,16 +3547,21 @@ def process_movie(
                 }
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 6. STREAMTAPE
-        # ----------------------------------------------------
+        # ====================================================
 
         stream_outputs = []
 
         for item in outputs:
 
-            resolution = item["resolution"]
-            output_path = item["path"]
+            resolution = item[
+                "resolution"
+            ]
+
+            output_path = item[
+                "path"
+            ]
 
             log(
                 f"Uploading {resolution}p "
@@ -2769,14 +3587,15 @@ def process_movie(
                 f"{streamtape['link']}"
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 7. VCDN
         # ONLY HIGHEST QUALITY
-        # ----------------------------------------------------
+        # ====================================================
 
         highest = max(
             outputs,
-            key=lambda x: x["resolution"]
+            key=lambda x:
+                x["resolution"]
         )
 
         log(
@@ -2788,9 +3607,9 @@ def process_movie(
             highest["path"]
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 8. BUILD BLOGGER HTML
-        # ----------------------------------------------------
+        # ====================================================
 
         content = build_html(
             meta,
@@ -2799,35 +3618,41 @@ def process_movie(
             info["duration"]
         )
 
-        # ----------------------------------------------------
-        # 9. VERIFY BLOGGER BLOG
-        # ----------------------------------------------------
+        # ====================================================
+        # 9. VERIFY BLOGGER
+        # ====================================================
 
         verify_blogger_access(
             blogger
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 10. CREATE BLOGGER POST
-        # ----------------------------------------------------
+        # ====================================================
 
-        blogger_post = create_blogger_post(
-            blogger,
-            meta["title"],
-            content,
-            meta["labels"]
+        blogger_post = (
+            create_blogger_post(
+                blogger,
+                meta["title"],
+                content,
+                meta["labels"]
+            )
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 11. FINAL BLOGGER VERIFICATION
-        # ----------------------------------------------------
+        # ====================================================
 
-        blogger_post_id = blogger_post.get(
-            "id"
+        blogger_post_id = (
+            blogger_post.get(
+                "id"
+            )
         )
 
-        blogger_post_url = blogger_post.get(
-            "url"
+        blogger_post_url = (
+            blogger_post.get(
+                "url"
+            )
         )
 
         if not blogger_post_id:
@@ -2838,7 +3663,7 @@ def process_movie(
             )
 
         log(
-            "=================================================="
+            "=" * 50
         )
 
         log(
@@ -2846,20 +3671,22 @@ def process_movie(
         )
 
         log(
-            f"Post ID: {blogger_post_id}"
+            f"Post ID: "
+            f"{blogger_post_id}"
         )
 
         log(
-            f"Post URL: {blogger_post_url}"
+            f"Post URL: "
+            f"{blogger_post_url}"
         )
 
         log(
-            "=================================================="
+            "=" * 50
         )
 
-        # ----------------------------------------------------
-        # 12. ONLY NOW DELETE DRIVE SOURCE
-        # ----------------------------------------------------
+        # ====================================================
+        # 12. DELETE DRIVE ONLY AFTER EVERYTHING SUCCEEDS
+        # ====================================================
 
         log(
             "All upload and Blogger checks "
@@ -2875,24 +3702,27 @@ def process_movie(
             file_id
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # SUCCESS
-        # ----------------------------------------------------
+        # ====================================================
 
         log(
             "POST DONE"
         )
 
         log(
-            f"Title: {meta['title']}"
+            f"Title: "
+            f"{meta['title']}"
         )
 
         log(
-            f"Blogger URL: {blogger_post_url}"
+            f"Blogger URL: "
+            f"{blogger_post_url}"
         )
 
         log(
-            f"Drive source deleted: {file_id}"
+            f"Drive source deleted: "
+            f"{file_id}"
         )
 
         return True
@@ -2906,11 +3736,13 @@ def process_movie(
         )
 
         log(
-            f"Movie: {original_name}"
+            f"Movie: "
+            f"{original_name}"
         )
 
         log(
-            f"Error: {error}"
+            f"Error: "
+            f"{error}"
         )
 
         log(
@@ -2926,9 +3758,9 @@ def process_movie(
 
     finally:
 
-        # ----------------------------------------------------
+        # ====================================================
         # LOCAL WORK CLEANUP ONLY
-        # ----------------------------------------------------
+        # ====================================================
 
         try:
 
@@ -2946,160 +3778,4 @@ def process_movie(
         except Exception as cleanup_error:
 
             log(
-                "Local cleanup warning: "
-                f"{cleanup_error}"
-            )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    log("=" * 70)
-
-    log(
-        "MOVIE BOT STARTING"
-    )
-
-    log(
-        f"Publish mode: {PUBLISH}"
-    )
-
-    log(
-        "Google Drive is temporary source only."
-    )
-
-    log(
-        "No output will be uploaded to Drive."
-    )
-
-    log("=" * 70)
-
-    WORK.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # --------------------------------------------------------
-    # GOOGLE CLIENTS
-    # --------------------------------------------------------
-
-    log(
-        "Connecting to Google..."
-    )
-
-    drive, blogger = google_clients()
-
-    # --------------------------------------------------------
-    # VERIFY BLOG
-    # --------------------------------------------------------
-
-    verify_blogger_access(
-        blogger
-    )
-
-    # --------------------------------------------------------
-    # DRIVE VIDEOS
-    # --------------------------------------------------------
-
-    videos = list_videos(
-        drive
-    )
-
-    if not videos:
-
-        log(
-            "No new video found in Drive."
-        )
-
-        return
-
-    log(
-        f"Found {len(videos)} video(s)."
-    )
-
-    videos = videos[:MAX_VIDEOS]
-
-    # --------------------------------------------------------
-    # GEMINI
-    # --------------------------------------------------------
-
-    gemini = genai.Client(
-        api_key=GEMINI_KEY
-    )
-
-    success_count = 0
-    failed_count = 0
-
-    # --------------------------------------------------------
-    # PROCESS
-    # --------------------------------------------------------
-
-    for index, file_info in enumerate(
-        videos,
-        start=1
-    ):
-
-        log(
-            f"Processing video "
-            f"{index}/{len(videos)}"
-        )
-
-        success = process_movie(
-            drive,
-            blogger,
-            file_info,
-            gemini
-        )
-
-        if success:
-            success_count += 1
-        else:
-            failed_count += 1
-
-    # --------------------------------------------------------
-    # FINAL
-    # --------------------------------------------------------
-
-    log("=" * 70)
-
-    log(
-        "MOVIE BOT FINISHED"
-    )
-
-    log(
-        f"Successful: {success_count}"
-    )
-
-    log(
-        f"Failed: {failed_count}"
-    )
-
-    log("=" * 70)
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-
-    try:
-
-        main()
-
-    except Exception as error:
-
-        log(
-            "FATAL ERROR:"
-        )
-
-        log(
-            str(error)
-        )
-
-        traceback.print_exc()
-
-        sys.exit(1)
+                "Local cleanup warning
