@@ -1,8 +1,14 @@
 """
 Movie Bot: Drive video -> multi-resolution -> VCDN Watch Online
-+ Google Drive downloads + screenshots + 9:16 thumbnail
++ VCDN multi-quality playback + screenshots + 9:16 thumbnail
 -> Gemini title/description/labels -> Blogger post (draft by default).
-Runs on GitHub Actions. All settings come from environment variables.
+
+Converted videos are NOT uploaded to Google Drive.
+Google Drive keeps the original source until successful publishing,
+plus the existing thumbnail/screenshots in _output.
+
+Runs on GitHub Actions.
+All settings come from environment variables.
 """
 
 import html
@@ -18,7 +24,6 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
 from pathlib import Path
 
 from google import genai
@@ -29,7 +34,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 
-# ---------- settings ----------
+# ============================================================
+# SETTINGS
+# ============================================================
+
 CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
@@ -37,23 +45,55 @@ GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 BLOG_ID = os.environ["BLOG_ID"]
 INPUT_FOLDER = os.environ["DRIVE_INPUT_FOLDER_ID"]
 
-# VCDN API key must be stored in GitHub Actions Secrets as VCDN_API_KEY.
+# VCDN API key must be stored in GitHub Actions Secrets
+# as VCDN_API_KEY.
 VCDN_API_KEY = os.environ["VCDN_API_KEY"].strip()
 VCDN_API_HOST = "cdn.vcdn.me"
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.environ.get(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash"
+)
+
 RESOLUTIONS = [
     int(x)
-    for x in os.environ.get("RESOLUTIONS", "480,720,1080").split(",")
+    for x in os.environ.get(
+        "RESOLUTIONS",
+        "480,720,1080"
+    ).split(",")
     if x.strip()
 ]
-MAX_VIDEOS = int(os.environ.get("MAX_VIDEOS", "1"))
-PUBLISH = os.environ.get("PUBLISH", "false").lower() == "true"
-LANGUAGE_HINT = os.environ.get("LANGUAGE_HINT", "").strip()
-AUDIO_MINUTES = int(os.environ.get("AUDIO_MINUTES", "10"))
-SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
-WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
-DIRECTOR_NAME = os.environ.get("DIRECTOR_NAME", "").strip()
+
+MAX_VIDEOS = int(
+    os.environ.get("MAX_VIDEOS", "1")
+)
+
+PUBLISH = (
+    os.environ.get("PUBLISH", "false").lower()
+    == "true"
+)
+
+LANGUAGE_HINT = os.environ.get(
+    "LANGUAGE_HINT",
+    ""
+).strip()
+
+AUDIO_MINUTES = int(
+    os.environ.get("AUDIO_MINUTES", "10")
+)
+
+SCREENSHOTS = int(
+    os.environ.get("SCREENSHOTS", "6")
+)
+
+WAIT_SECONDS = int(
+    os.environ.get("WAIT_SECONDS", "20")
+)
+
+DIRECTOR_NAME = os.environ.get(
+    "DIRECTOR_NAME",
+    ""
+).strip()
 
 CRF = {
     480: 24,
@@ -71,6 +111,10 @@ SCOPES = [
 ]
 
 
+# ============================================================
+# LOGGING / RETRY
+# ============================================================
+
 def log(*a):
     print(*a, flush=True)
 
@@ -82,7 +126,11 @@ def retry(fn, tries=4):
         except Exception as e:
             if i == tries - 1:
                 raise
-            log(f"  retry {i + 1} after error: {e}")
+
+            log(
+                f"  retry {i + 1} after error: {e}"
+            )
+
             time.sleep(5 * (i + 1))
 
 
@@ -90,7 +138,9 @@ def run(cmd):
     subprocess.run(cmd, check=True)
 
 
-# ---------- Google clients ----------
+# ============================================================
+# GOOGLE CLIENTS
+# ============================================================
 
 creds = Credentials(
     None,
@@ -107,32 +157,36 @@ drive = build(
     "drive",
     "v3",
     credentials=creds,
-    cache_discovery=False,
+    cache_discovery=False
 )
 
 blogger = build(
     "blogger",
     "v3",
     credentials=creds,
-    cache_discovery=False,
+    cache_discovery=False
 )
 
-gclient = genai.Client(api_key=GEMINI_KEY)
+gclient = genai.Client(
+    api_key=GEMINI_KEY
+)
 
 
-# ---------- Drive helpers ----------
+# ============================================================
+# GOOGLE DRIVE HELPERS
+# ============================================================
 
 def ensure_folder(name):
     q = (
-        f"'{INPUT_FOLDER}' in parents and "
-        f"name='{name}' and "
-        "mimeType='application/vnd.google-apps.folder' and "
-        "trashed=false"
+        f"'{INPUT_FOLDER}' in parents "
+        f"and name='{name}' "
+        "and mimeType='application/vnd.google-apps.folder' "
+        "and trashed=false"
     )
 
     res = drive.files().list(
         q=q,
-        fields="files(id)",
+        fields="files(id)"
     ).execute()
 
     if res["files"]:
@@ -146,40 +200,44 @@ def ensure_folder(name):
 
     return drive.files().create(
         body=body,
-        fields="id",
+        fields="id"
     ).execute()["id"]
 
 
 def list_videos():
     q = (
-        f"'{INPUT_FOLDER}' in parents and "
-        "mimeType contains 'video/' and "
-        "trashed=false"
+        f"'{INPUT_FOLDER}' in parents "
+        "and mimeType contains 'video/' "
+        "and trashed=false"
     )
 
     res = drive.files().list(
         q=q,
         fields="files(id,name,size)",
-        orderBy="createdTime",
+        orderBy="createdTime"
     ).execute()
 
     return res["files"]
 
 
 def download(file_id, dest):
-    req = drive.files().get_media(fileId=file_id)
+    req = drive.files().get_media(
+        fileId=file_id
+    )
 
     with open(dest, "wb") as fh:
         dl = MediaIoBaseDownload(
             fh,
             req,
-            chunksize=64 * 1024 * 1024,
+            chunksize=64 * 1024 * 1024
         )
 
         done = False
 
         while not done:
-            status, done = retry(dl.next_chunk)
+            status, done = retry(
+                dl.next_chunk
+            )
 
             if status:
                 log(
@@ -189,26 +247,36 @@ def download(file_id, dest):
 
 
 def upload_public(path, parent, mime):
+    """
+    Used ONLY for images such as:
+      - thumbnail
+      - screenshots
+
+    Converted video files are NOT uploaded to Drive.
+    """
+
     media = MediaFileUpload(
         path,
         mimetype=mime,
         resumable=True,
-        chunksize=64 * 1024 * 1024,
+        chunksize=64 * 1024 * 1024
     )
 
     req = drive.files().create(
         body={
             "name": os.path.basename(path),
-            "parents": [parent],
+            "parents": [parent]
         },
         media_body=media,
-        fields="id",
+        fields="id"
     )
 
     resp = None
 
     while resp is None:
-        _, resp = retry(req.next_chunk)
+        _, resp = retry(
+            req.next_chunk
+        )
 
     fid = resp["id"]
 
@@ -217,8 +285,8 @@ def upload_public(path, parent, mime):
             fileId=fid,
             body={
                 "type": "anyone",
-                "role": "reader",
-            },
+                "role": "reader"
+            }
         ).execute()
     )
 
@@ -231,7 +299,8 @@ def upload_public(path, parent, mime):
 
 VCDN_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "AppleWebKit/537.36 "
+    "(KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
@@ -250,17 +319,27 @@ def _vcdn_auth_headers(content_type=None):
     return headers
 
 
-def _vcdn_json(method, path, payload=None):
+def _vcdn_json(
+    method,
+    path,
+    payload=None
+):
     """
     Call VCDN JSON API.
     """
 
     body = None
+
     headers = _vcdn_auth_headers()
 
     if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        body = json.dumps(
+            payload
+        ).encode("utf-8")
+
+        headers["Content-Type"] = (
+            "application/json"
+        )
 
     def request():
         req = urllib.request.Request(
@@ -273,12 +352,12 @@ def _vcdn_json(method, path, payload=None):
         try:
             with urllib.request.urlopen(
                 req,
-                timeout=120,
+                timeout=120
             ) as resp:
 
                 raw = resp.read().decode(
                     "utf-8",
-                    "replace",
+                    "replace"
                 )
 
                 return (
@@ -290,52 +369,65 @@ def _vcdn_json(method, path, payload=None):
         except urllib.error.HTTPError as e:
             detail = e.read().decode(
                 "utf-8",
-                "replace",
+                "replace"
             )
 
             raise RuntimeError(
-                f"VCDN {method} {path} failed: "
-                f"HTTP {e.code}: {detail}"
+                f"VCDN {method} {path} "
+                f"failed: HTTP {e.code}: {detail}"
             ) from e
 
         except urllib.error.URLError as e:
             raise RuntimeError(
-                f"VCDN connection failed for "
-                f"{method} {path}: {e}"
+                f"VCDN connection failed "
+                f"for {method} {path}: {e}"
             ) from e
 
-    return retry(request, tries=4)
+    return retry(
+        request,
+        tries=4
+    )
 
 
 def _vcdn_upload_binary(
     upload_id,
     path,
-    upload_url=None,
+    upload_url=None
 ):
     """
-    Upload video bytes to VCDN.
+    Upload video bytes to VCDN without
+    loading the entire movie into RAM.
     """
 
     file_size = os.path.getsize(path)
 
     target = (
         upload_url
-        or f"https://{VCDN_API_HOST}"
-           f"/api/v1/upload/{upload_id}/chunk"
+        or
+        f"https://{VCDN_API_HOST}"
+        f"/api/v1/upload/{upload_id}/chunk"
     )
 
     if target.startswith("https://"):
+
         from urllib.parse import urlsplit
 
         parsed = urlsplit(target)
 
         target_host = parsed.netloc
-        target_path = parsed.path or "/"
+
+        target_path = (
+            parsed.path
+            or "/"
+        )
 
         if parsed.query:
-            target_path += "?" + parsed.query
+            target_path += (
+                "?" + parsed.query
+            )
 
     else:
+
         target_host = VCDN_API_HOST
 
         target_path = (
@@ -348,14 +440,14 @@ def _vcdn_upload_binary(
 
         conn = http.client.HTTPSConnection(
             target_host,
-            timeout=1800,
+            timeout=1800
         )
 
         try:
 
             conn.putrequest(
                 "POST",
-                target_path,
+                target_path
             )
 
             headers = _vcdn_auth_headers(
@@ -369,7 +461,7 @@ def _vcdn_upload_binary(
             for key, value in headers.items():
                 conn.putheader(
                     key,
-                    value,
+                    value
                 )
 
             conn.endheaders()
@@ -394,7 +486,8 @@ def _vcdn_upload_binary(
 
                     pct = (
                         int(
-                            sent * 100 / file_size
+                            sent * 100 /
+                            file_size
                         )
                         if file_size
                         else 100
@@ -405,7 +498,8 @@ def _vcdn_upload_binary(
                         or pct == 100
                     ):
                         log(
-                            f"  VCDN upload {pct}%"
+                            f"  VCDN upload "
+                            f"{pct}%"
                         )
 
                         last_log = pct
@@ -414,10 +508,13 @@ def _vcdn_upload_binary(
 
             raw = resp.read().decode(
                 "utf-8",
-                "replace",
+                "replace"
             )
 
-            if resp.status < 200 or resp.status >= 300:
+            if (
+                resp.status < 200
+                or resp.status >= 300
+            ):
                 raise RuntimeError(
                     "VCDN binary upload failed: "
                     f"HTTP {resp.status}: {raw}"
@@ -440,7 +537,7 @@ def _vcdn_upload_binary(
 
     return retry(
         upload,
-        tries=3,
+        tries=3
     )
 
 
@@ -448,8 +545,12 @@ def _multipart_header(
     boundary,
     title,
     filename,
-    file_size,
+    file_size
 ):
+    """
+    Build multipart/form-data prefix
+    and suffix.
+    """
 
     safe_name = (
         os.path.basename(filename)
@@ -475,53 +576,30 @@ def _multipart_header(
 
     suffix = (
         f"\r\n--{boundary}--\r\n"
-    ).encode("utf-8")
+        .encode("utf-8")
+    )
 
     return prefix, suffix
 
 
-def _print_vcdn_response(
-    label,
-    data,
-):
-    """
-    Print COMPLETE VCDN response.
-    This is intentionally verbose so we can inspect
-    every field returned by VCDN.
-    """
-
-    log("")
-    log("=" * 70)
-    log(label)
-    log("=" * 70)
-
-    try:
-        log(
-            json.dumps(
-                data,
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
-    except Exception:
-        log(str(data))
-
-    log("=" * 70)
-    log("")
-
-
 def _vcdn_direct_upload(
     path,
-    title,
+    title
 ):
     """
-    Fallback/direct REST upload.
+    Primary VCDN upload route:
+
+    POST https://api.vcdn.me/videos
+
+    If this endpoint rejects a large file,
+    vcdn_upload() falls back to chunked upload.
     """
 
     host = "api.vcdn.me"
 
     boundary = (
-        "----MovieBotVCDNBoundary7MA4YWxkTrZu0gW"
+        "----MovieBotVCDNBoundary"
+        "7MA4YWxkTrZu0gW"
     )
 
     file_size = os.path.getsize(path)
@@ -530,7 +608,7 @@ def _vcdn_direct_upload(
         boundary,
         title,
         path,
-        file_size,
+        file_size
     )
 
     total_length = (
@@ -543,14 +621,14 @@ def _vcdn_direct_upload(
 
         conn = http.client.HTTPSConnection(
             host,
-            timeout=1800,
+            timeout=1800
         )
 
         try:
 
             conn.putrequest(
                 "POST",
-                "/videos",
+                "/videos"
             )
 
             headers = _vcdn_auth_headers(
@@ -558,14 +636,14 @@ def _vcdn_direct_upload(
                 f"boundary={boundary}"
             )
 
-            headers["Content-Length"] = str(
-                total_length
+            headers["Content-Length"] = (
+                str(total_length)
             )
 
             for key, value in headers.items():
                 conn.putheader(
                     key,
-                    value,
+                    value
                 )
 
             conn.endheaders()
@@ -590,15 +668,19 @@ def _vcdn_direct_upload(
 
                     sent += len(chunk)
 
-                    pct = int(
-                        sent * 100 / file_size
-                    ) if file_size else 100
+                    pct = (
+                        int(
+                            sent * 100 /
+                            file_size
+                        )
+                        if file_size
+                        else 100
+                    )
 
                     if (
                         pct >= last_log + 10
                         or pct == 100
                     ):
-
                         log(
                             f"  VCDN direct upload "
                             f"{pct}%"
@@ -612,10 +694,13 @@ def _vcdn_direct_upload(
 
             raw = resp.read().decode(
                 "utf-8",
-                "replace",
+                "replace"
             )
 
-            if resp.status < 200 or resp.status >= 300:
+            if (
+                resp.status < 200
+                or resp.status >= 300
+            ):
                 raise RuntimeError(
                     "VCDN direct upload failed: "
                     f"HTTP {resp.status}: {raw}"
@@ -630,18 +715,10 @@ def _vcdn_direct_upload(
 
             except json.JSONDecodeError:
                 raise RuntimeError(
-                    "VCDN direct upload returned "
-                    f"non-JSON response: {raw[:1000]}"
+                    "VCDN direct upload "
+                    "returned non-JSON response: "
+                    f"{raw[:1000]}"
                 )
-
-            # ==================================================
-            # COMPLETE RAW RESPONSE DEBUG
-            # ==================================================
-
-            _print_vcdn_response(
-                "VCDN DIRECT UPLOAD COMPLETE RESPONSE",
-                data,
-            )
 
             video_id = (
                 data.get("id")
@@ -659,9 +736,12 @@ def _vcdn_direct_upload(
                 or data.get("playbackUrl")
             )
 
-            if not embed_url and video_id:
+            if (
+                not embed_url
+                and video_id
+            ):
                 embed_url = (
-                    f"https://embed.vcdn.me/"
+                    "https://embed.vcdn.me/"
                     f"{video_id}"
                 )
 
@@ -677,18 +757,18 @@ def _vcdn_direct_upload(
 
             log(
                 "  VCDN video:",
-                video_id or "unknown",
+                video_id or "unknown"
             )
 
             log(
                 "  VCDN embed:",
-                embed_url or "unknown",
+                embed_url or "unknown"
             )
 
             if playback_url:
                 log(
                     "  VCDN HLS:",
-                    playback_url,
+                    playback_url
                 )
 
             return {
@@ -696,9 +776,6 @@ def _vcdn_direct_upload(
                 "embed_url": embed_url,
                 "playback_url": playback_url,
                 "status": data.get("status"),
-
-                # Keep the COMPLETE API response
-                # for inspection.
                 "raw_response": data,
             }
 
@@ -707,25 +784,33 @@ def _vcdn_direct_upload(
 
     return retry(
         upload,
-        tries=3,
+        tries=3
     )
 
 
 def vcdn_upload(
     path,
-    title,
+    title
 ):
     """
-    Upload video to VCDN.
+    Upload a video to VCDN.
 
-    IMPORTANT:
-    This version prints the complete API responses.
-    We are NOT changing the download system yet.
+    Primary:
+        POST https://api.vcdn.me/videos
+
+    Fallback:
+        /api/v1/upload/init
+        /api/v1/upload/{id}/chunk
+        /api/v1/upload/complete
+
+    Then poll:
+        GET /api/v1/videos/{id}
     """
 
     log(
-        f"Uploading {os.path.basename(path)} "
-        "to VCDN..."
+        f"Uploading "
+        f"{os.path.basename(path)} "
+        f"to VCDN..."
     )
 
     file_size = os.path.getsize(path)
@@ -735,6 +820,10 @@ def vcdn_upload(
             f"VCDN upload file is empty: {path}"
         )
 
+    # --------------------------------------------------------
+    # PRIMARY DIRECT UPLOAD
+    # --------------------------------------------------------
+
     try:
 
         log(
@@ -742,16 +831,18 @@ def vcdn_upload(
             f"{file_size} bytes"
         )
 
-        return _vcdn_direct_upload(
+        result = _vcdn_direct_upload(
             path,
-            title,
+            title
         )
+
+        return result
 
     except Exception as direct_error:
 
         log(
             "  VCDN direct REST upload failed:",
-            direct_error,
+            direct_error
         )
 
         direct_text = str(
@@ -764,18 +855,17 @@ def vcdn_upload(
             "413 Request Entity Too Large"
             in direct_text
         ):
-
             log(
                 "  VCDN direct endpoint "
                 "rejected the file as too large; "
                 "switching to chunked upload."
             )
 
-        try:
+        # ----------------------------------------------------
+        # CHUNKED UPLOAD FALLBACK
+        # ----------------------------------------------------
 
-            # --------------------------------------------------
-            # INIT
-            # --------------------------------------------------
+        try:
 
             init = _vcdn_json(
                 "POST",
@@ -784,12 +874,7 @@ def vcdn_upload(
                     "filename": os.path.basename(path),
                     "title": title,
                     "size": file_size,
-                },
-            )
-
-            _print_vcdn_response(
-                "VCDN UPLOAD INIT RESPONSE",
-                init,
+                }
             )
 
             upload_id = (
@@ -805,42 +890,36 @@ def vcdn_upload(
             if not upload_id:
                 raise RuntimeError(
                     "VCDN init did not return "
-                    "upload_id/uploadId: "
-                    f"{init}"
+                    f"upload_id/uploadId: {init}"
                 )
 
             log(
-                f"  VCDN chunk upload id: "
-                f"{upload_id}"
+                "  VCDN chunk upload id:",
+                upload_id
             )
 
             if upload_url:
                 log(
-                    f"  VCDN chunk upload URL: "
-                    f"{upload_url}"
+                    "  VCDN chunk upload URL:",
+                    upload_url
                 )
 
             _vcdn_upload_binary(
                 upload_id,
                 path,
-                upload_url,
+                upload_url
             )
 
-            # --------------------------------------------------
+            # ------------------------------------------------
             # COMPLETE
-            # --------------------------------------------------
+            # ------------------------------------------------
 
             complete = _vcdn_json(
                 "POST",
                 "/api/v1/upload/complete",
                 {
-                    "uploadId": upload_id,
-                },
-            )
-
-            _print_vcdn_response(
-                "VCDN CHUNK COMPLETE RESPONSE",
-                complete,
+                    "uploadId": upload_id
+                }
             )
 
             video_id = (
@@ -866,149 +945,125 @@ def vcdn_upload(
             if not video_id:
                 raise RuntimeError(
                     "VCDN complete returned "
-                    "no video id: "
-                    f"{complete}"
+                    f"no video id: {complete}"
                 )
 
-            # --------------------------------------------------
-            # POLL VIDEO STATUS
-            # --------------------------------------------------
+            # ------------------------------------------------
+            # POLL STATUS
+            # ------------------------------------------------
 
-            if (
-                status not in (
+            deadline = (
+                time.time()
+                + 10 * 60
+            )
+
+            last_video = complete
+
+            while (
+                time.time() < deadline
+            ):
+
+                if status in (
                     "ready",
                     "processed",
                     "complete",
-                    "completed",
-                )
-                or not embed_url
-            ):
+                    "completed"
+                ) and embed_url:
+                    break
 
-                deadline = (
-                    time.time()
-                    + 10 * 60
-                )
+                time.sleep(5)
 
-                last_video = complete
+                try:
 
-                while (
-                    time.time()
-                    < deadline
-                ):
-
-                    time.sleep(5)
-
-                    try:
-
-                        info = _vcdn_json(
-                            "GET",
-                            "/api/v1/videos/"
-                            + urllib.parse.quote(
-                                str(video_id),
-                                safe="",
-                            ),
+                    info = _vcdn_json(
+                        "GET",
+                        "/api/v1/videos/"
+                        + urllib.parse.quote(
+                            str(video_id),
+                            safe=""
                         )
-
-                    except Exception as poll_error:
-
-                        log(
-                            "  VCDN status check failed:",
-                            poll_error,
-                        )
-
-                        continue
-
-                    # ==================================================
-                    # COMPLETE VIDEO STATUS DEBUG
-                    # ==================================================
-
-                    _print_vcdn_response(
-                        "VCDN VIDEO STATUS RESPONSE",
-                        info,
                     )
 
-                    last_video = (
-                        info
-                        or last_video
-                    )
-
-                    status = (
-                        info.get("status")
-                        or status
-                    )
-
-                    embed_url = (
-                        info.get("embed_url")
-                        or info.get("embedUrl")
-                        or embed_url
-                    )
-
-                    playback_url = (
-                        info.get("playback_url")
-                        or info.get("playbackUrl")
-                        or playback_url
-                    )
+                except Exception as poll_error:
 
                     log(
-                        "  VCDN processing status:",
-                        status,
+                        "  VCDN status check failed:",
+                        poll_error
                     )
 
-                    if status in (
-                        "ready",
-                        "processed",
-                        "complete",
-                        "completed",
-                    ):
-                        break
+                    continue
 
-                    if status in (
-                        "failed",
-                        "error",
-                    ):
+                last_video = (
+                    info
+                    or last_video
+                )
 
-                        raise RuntimeError(
-                            "VCDN processing failed "
-                            f"for {video_id}: "
-                            f"{info}"
-                        )
+                status = (
+                    info.get("status")
+                    or status
+                )
+
+                embed_url = (
+                    info.get("embed_url")
+                    or info.get("embedUrl")
+                    or embed_url
+                )
+
+                playback_url = (
+                    info.get("playback_url")
+                    or info.get("playbackUrl")
+                    or playback_url
+                )
+
+                log(
+                    "  VCDN processing status:",
+                    status
+                )
+
+                if status in (
+                    "failed",
+                    "error"
+                ):
+                    raise RuntimeError(
+                        "VCDN processing failed "
+                        f"for {video_id}: {info}"
+                    )
+
+            # ------------------------------------------------
+            # FALLBACK EMBED URL
+            # ------------------------------------------------
 
             if not embed_url:
                 embed_url = (
-                    f"https://embed.vcdn.me/"
-                    f"{video_id}"
+                    "https://embed.vcdn.me/"
+                    f"embed/{video_id}"
                 )
 
-            if (
-                not video_id
-                or not embed_url
-            ):
-
+            if not embed_url:
                 raise RuntimeError(
-                    "VCDN complete/status "
-                    "returned no usable player data: "
-                    f"{last_video}"
+                    "VCDN status returned no "
+                    f"usable player data: {last_video}"
                 )
 
             log(
                 "  VCDN video:",
-                video_id,
+                video_id
             )
 
             log(
                 "  VCDN embed:",
-                embed_url,
+                embed_url
             )
 
             if playback_url:
                 log(
                     "  VCDN HLS:",
-                    playback_url,
+                    playback_url
                 )
 
             log(
                 "  VCDN final status:",
-                status or "unknown",
+                status or "unknown"
             )
 
             return {
@@ -1016,12 +1071,7 @@ def vcdn_upload(
                 "embed_url": embed_url,
                 "playback_url": playback_url,
                 "status": status,
-
-                # Preserve all data returned
-                # by VCDN.
-                "raw_response": (
-                    last_video
-                ),
+                "raw_response": last_video,
             }
 
         except Exception as chunk_error:
@@ -1036,11 +1086,16 @@ def vcdn_upload(
             ) from chunk_error
 
 
-# ---------- ffmpeg helpers ----------
+# ============================================================
+# FFMPEG HELPERS
+# ============================================================
 
 def parse_fps(*vals):
+
     for v in vals:
+
         try:
+
             a, b = str(v).split("/")
 
             a = float(a)
@@ -1056,6 +1111,7 @@ def parse_fps(*vals):
 
 
 def fmt_fps(x):
+
     r = round(x)
 
     if abs(x - r) < 0.05:
@@ -1065,6 +1121,7 @@ def fmt_fps(x):
 
 
 def probe(path):
+
     out = subprocess.check_output([
         "ffprobe",
         "-v",
@@ -1076,7 +1133,7 @@ def probe(path):
         "format=duration",
         "-of",
         "json",
-        path,
+        path
     ])
 
     d = json.loads(out)
@@ -1085,21 +1142,21 @@ def probe(path):
 
     fps = parse_fps(
         st.get("avg_frame_rate"),
-        st.get("r_frame_rate"),
+        st.get("r_frame_rate")
     )
 
     return (
         float(d["format"]["duration"]),
         int(st["width"]),
         int(st["height"]),
-        fps,
+        fps
     )
 
 
 def make_screenshots(
     src,
     dur,
-    outdir,
+    outdir
 ):
 
     files = []
@@ -1132,7 +1189,7 @@ def make_screenshots(
             "scale=1280:-2",
             "-q:v",
             "3",
-            p,
+            p
         ])
 
         files.append(p)
@@ -1145,10 +1202,12 @@ def make_thumbnail(
     dur,
     w,
     h,
-    outdir,
+    outdir
 ):
     """
     9:16 portrait thumbnail.
+    720x1280.
+    Centre crop from 35%.
     """
 
     if w * 16 >= h * 9:
@@ -1191,7 +1250,7 @@ def make_thumbnail(
         f"crop={cw}:{ch},scale=720:1280",
         "-q:v",
         "2",
-        p,
+        p
     ])
 
     return p
@@ -1200,7 +1259,7 @@ def make_thumbnail(
 def analysis_inputs(
     src,
     dur,
-    outdir,
+    outdir
 ):
 
     frames = []
@@ -1235,7 +1294,7 @@ def analysis_inputs(
             "scale=512:-2",
             "-q:v",
             "5",
-            str(p),
+            str(p)
         ])
 
         frames.append(
@@ -1267,12 +1326,12 @@ def analysis_inputs(
         "16000",
         "-b:a",
         "32k",
-        str(audio),
+        str(audio)
     ])
 
     return (
         frames,
-        audio.read_bytes(),
+        audio.read_bytes()
     )
 
 
@@ -1281,19 +1340,22 @@ def transcode(
     target,
     w,
     h,
-    out,
+    out
 ):
+    """
+    target = short-side resolution.
+    Works for landscape and portrait.
+    """
 
     crf = CRF.get(
         target,
-        23,
+        23
     )
 
-    vf = (
-        f"scale=-2:{target}"
-        if w >= h
-        else f"scale={target}:-2"
-    )
+    if w >= h:
+        vf = f"scale=-2:{target}"
+    else:
+        vf = f"scale={target}:-2"
 
     run([
         "ffmpeg",
@@ -1323,11 +1385,13 @@ def transcode(
         "128k",
         "-movflags",
         "+faststart",
-        out,
+        out
     ])
 
 
-# ---------- menu labels ----------
+# ============================================================
+# BLOG LABELS
+# ============================================================
 
 FALLBACK_LABELS = [
     "Bollywood Content",
@@ -1355,7 +1419,7 @@ FALLBACK_LABELS = [
 
 BLOCKED_LABEL = re.compile(
     r"18\+|adult|xxx|hevc|x265",
-    re.I,
+    re.I
 )
 
 
@@ -1363,7 +1427,7 @@ def parse_labels(page):
 
     found = re.findall(
         r"/search/label/([^\"'?&#<>\s/]+)",
-        page,
+        page
     )
 
     labels = []
@@ -1371,21 +1435,23 @@ def parse_labels(page):
 
     for f in found:
 
-        name = (
-            urllib.parse.unquote_plus(f)
-            .strip()
-        )
+        name = urllib.parse.unquote_plus(
+            f
+        ).strip()
 
         if (
             name
-            and name.lower() not in seen
+            and name.lower()
+            not in seen
         ):
 
             seen.add(
                 name.lower()
             )
 
-            labels.append(name)
+            labels.append(
+                name
+            )
 
     return labels
 
@@ -1405,33 +1471,31 @@ def get_site_labels():
             headers={
                 "User-Agent":
                 "Mozilla/5.0"
-            },
+            }
         )
 
-        page = (
-            urllib.request.urlopen(
-                req,
-                timeout=30,
-            )
-            .read()
-            .decode(
-                "utf-8",
-                "ignore",
-            )
+        page = urllib.request.urlopen(
+            req,
+            timeout=30
+        ).read().decode(
+            "utf-8",
+            "ignore"
         )
 
-        labels = parse_labels(page)
+        labels = parse_labels(
+            page
+        )
 
         log(
             f"  Found {len(labels)} "
-            "labels on the blog"
+            f"labels on the blog"
         )
 
     except Exception as e:
 
         log(
             "  Could not read blog labels:",
-            e,
+            e
         )
 
     if len(labels) < 3:
@@ -1458,7 +1522,7 @@ def get_site_labels():
 
 def pick_labels(
     raw,
-    site_labels,
+    site_labels
 ):
 
     canon = {
@@ -1480,7 +1544,9 @@ def pick_labels(
     return out[:4]
 
 
-# ---------- Gemini ----------
+# ============================================================
+# GEMINI
+# ============================================================
 
 def as_paragraphs(v):
 
@@ -1496,7 +1562,7 @@ def as_paragraphs(v):
         p.strip()
         for p in re.split(
             r"\n\s*\n",
-            str(v or ""),
+            str(v or "")
         )
         if p.strip()
     ]
@@ -1515,11 +1581,10 @@ def find_year(filename):
         Path(filename).stem
     )
 
-    return (
-        int(m.group(1))
-        if m
-        else None
-    )
+    if m:
+        return int(m.group(1))
+
+    return None
 
 
 def clean_hint(filename):
@@ -1529,35 +1594,32 @@ def clean_hint(filename):
     t = re.sub(
         r"[#@]\S+",
         " ",
-        t,
+        t
     )
 
     t = re.sub(
         r"[_.\-]+",
         " ",
-        t,
+        t
     )
 
     t = re.sub(
         r"[^\w\s]",
         " ",
         t,
-        flags=re.UNICODE,
+        flags=re.UNICODE
     )
 
     t = re.sub(
         r"\s+",
         " ",
-        t,
+        t
     ).strip()
 
     no_year = re.sub(
         r"\s+",
         " ",
-        YEAR_RE.sub(
-            " ",
-            t,
-        ),
+        YEAR_RE.sub(" ", t)
     ).strip()
 
     return no_year or t
@@ -1567,7 +1629,7 @@ def analyze(
     filename_hint,
     frames,
     audio_bytes,
-    site_labels,
+    site_labels
 ):
 
     hint = clean_hint(
@@ -1588,36 +1650,70 @@ Director name (may be empty): "{DIRECTOR_NAME}".
 
 Rules:
 - Write everything in your own words, in natural English.
-- Base it ONLY on what you can actually see and hear.
-- If unsure, stay general.
+- Never copy text from any website, film or review.
+- Base it ONLY on what you can actually see and hear in the frames and audio.
+- If unsure, stay general and talk about mood, visuals, sound and themes.
 - Never invent cast, crew, awards, festivals, ratings, box office or plot facts.
-- No piracy words.
+- No piracy words (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
 - The title must be a real film title of 1-6 words.
-- No hashtags, emojis, year or "trending reels".
+- No hashtags, emojis, year or words like "trending reels".
+- If the file name hint is messy, invent a fitting title from what the film is about.
 
 Return ONLY JSON with these keys:
 
-title
-tagline
-synopsis
-review
-themes
-faq
-genres
-language
-content_rating
-tags
-labels
+title:
+the film title
 
-labels must ONLY use this exact list:
+tagline:
+one sentence, max 20 words
 
+synopsis:
+2 short paragraphs, about 120 words,
+spoiler-light, separated by a blank line
+
+review:
+3-4 paragraphs, about 300 words,
+analysing tone, visual style and camera work,
+sound and music, performances in general terms,
+themes and who will enjoy the film,
+separated by blank lines
+
+themes:
+list of 3-5 short phrases
+
+faq:
+list of 4 objects:
+{{"q": "...", "a": "..."}}
+
+genres:
+list of 1-3 genres
+
+language:
+main spoken language
+
+content_rating:
+one of:
+"General audience"
+"Teen and above"
+"Mature audience"
+
+tags:
+list of up to 6 short keywords
+
+labels:
+pick 1-4 categories that best fit this film,
+ONLY from this exact list:
 {json.dumps(site_labels)}
+
+Judge by language spoken, film industry/country,
+and type (movie, web series, trailer, song, etc.).
+Ignore labels about video encoding or file format.
 """
 
     parts = [
         types.Part.from_bytes(
             data=b,
-            mime_type="image/jpeg",
+            mime_type="image/jpeg"
         )
         for b in frames
     ]
@@ -1625,7 +1721,7 @@ labels must ONLY use this exact list:
     parts.append(
         types.Part.from_bytes(
             data=audio_bytes,
-            mime_type="audio/mp3",
+            mime_type="audio/mp3"
         )
     )
 
@@ -1633,7 +1729,7 @@ labels must ONLY use this exact list:
 
     for model in dict.fromkeys([
         GEMINI_MODEL,
-        "gemini-flash-latest",
+        "gemini-flash-latest"
     ]):
 
         try:
@@ -1643,26 +1739,26 @@ labels must ONLY use this exact list:
                     model=model,
                     contents=[
                         prompt,
-                        *parts,
+                        *parts
                     ],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json"
-                    ),
+                    )
                 ),
-                tries=2,
+                tries=2
             )
 
             data = json.loads(
                 re.sub(
                     r"^```json|```$",
                     "",
-                    resp.text.strip(),
+                    resp.text.strip()
                 ).strip()
             )
 
             log(
                 "  Gemini model used:",
-                model,
+                model
             )
 
             break
@@ -1681,10 +1777,15 @@ labels must ONLY use this exact list:
 
     faq = [
         f
-        for f in (data.get("faq") or [])
-        if isinstance(f, dict)
-        and f.get("q")
-        and f.get("a")
+        for f in (
+            data.get("faq")
+            or []
+        )
+        if (
+            isinstance(f, dict)
+            and f.get("q")
+            and f.get("a")
+        )
     ]
 
     return {
@@ -1693,18 +1794,23 @@ labels must ONLY use this exact list:
             or hint
             or "Untitled Film"
         ),
-        "tagline": data.get(
-            "tagline"
-        ) or "",
+
+        "tagline": (
+            data.get("tagline")
+            or ""
+        ),
+
         "synopsis": (
             as_paragraphs(
                 data.get("synopsis")
             )
             or ["An original film."]
         ),
+
         "review": as_paragraphs(
             data.get("review")
         ),
+
         "themes": [
             str(t)
             for t in (
@@ -1712,33 +1818,42 @@ labels must ONLY use this exact list:
                 or []
             )
         ][:5],
+
         "faq": faq[:4],
+
         "genres": (
             data.get("genres")
             or ["Drama"]
         ),
+
         "language": (
             data.get("language")
             or LANGUAGE_HINT
             or "Unknown"
         ),
+
         "release_year": year,
+
         "content_rating": (
             data.get("content_rating")
             or "General audience"
         ),
+
         "tags": (
             data.get("tags")
             or []
         ),
+
         "labels": pick_labels(
             data.get("labels"),
-            site_labels,
+            site_labels
         ),
     }
 
 
-# ---------- post HTML ----------
+# ============================================================
+# HTML HELPERS
+# ============================================================
 
 def human(n):
 
@@ -1775,84 +1890,13 @@ def fmt_runtime(sec):
 def img_url(fid):
 
     return (
-        "https://lh3.googleusercontent.com/d/"
-        f"{fid}"
+        f"https://lh3.googleusercontent.com/d/{fid}"
     )
 
 
-TIMER_SCRIPT = """<script>
-(function () {
-  var WAIT = %d;
-  var btns = document.querySelectorAll('a.mv-dl[data-fid]');
-
-  for (var i = 0; i < btns.length; i++) {
-
-    (function (b) {
-
-      var label = b.innerHTML;
-      var busy = false;
-
-      b.addEventListener('click', function (e) {
-
-        e.preventDefault();
-
-        if (busy) {
-          return;
-        }
-
-        busy = true;
-
-        var left = WAIT;
-
-        b.style.opacity = '0.85';
-
-        b.innerHTML =
-          'Please wait ' +
-          left +
-          ' seconds...';
-
-        var t = setInterval(function () {
-
-          left--;
-
-          if (left > 0) {
-
-            b.innerHTML =
-              'Please wait ' +
-              left +
-              ' seconds...';
-
-            return;
-          }
-
-          clearInterval(t);
-
-          b.innerHTML =
-            'Download starting...';
-
-          window.location.href =
-            'https://drive.usercontent.google.com/download?id=' +
-            b.getAttribute('data-fid') +
-            '&export=download&confirm=t';
-
-          setTimeout(function () {
-
-            b.innerHTML = label;
-            b.style.opacity = '1';
-            busy = false;
-
-          }, 6000);
-
-        }, 1000);
-
-      });
-
-    })(btns[i]);
-  }
-
-})();
-</script>""" % WAIT_SECONDS
-
+# ============================================================
+# BLOGGER HTML
+# ============================================================
 
 def build_html(
     meta,
@@ -1861,7 +1905,7 @@ def build_html(
     outputs,
     fps,
     dur,
-    vcdn,
+    vcdn
 ):
 
     e = html.escape
@@ -1870,7 +1914,9 @@ def build_html(
         meta["title"]
     )
 
-    year = meta["release_year"]
+    year = meta[
+        "release_year"
+    ]
 
     ytxt = (
         f" ({year})"
@@ -1880,7 +1926,8 @@ def build_html(
 
     lang_known = (
         meta["language"]
-        and meta["language"].lower()
+        and
+        meta["language"].lower()
         != "unknown"
     )
 
@@ -1890,7 +1937,7 @@ def build_html(
 
     lang_tag = (
         f' <span style="color:#f2f200">'
-        f"{{{lang}}}</span>"
+        f'{{{lang}}}</span>'
         if lang_known
         else ""
     )
@@ -1900,7 +1947,9 @@ def build_html(
         for g in meta["genres"]
     )
 
-    fps_txt = fmt_fps(fps)
+    fps_txt = fmt_fps(
+        fps
+    )
 
     qualities = " - ".join(
         f"{h}p"
@@ -1934,9 +1983,12 @@ def build_html(
         "font-size:19px;"
         "text-decoration:none;"
         "cursor:pointer;"
-        "background:linear-gradient("
-        "90deg,#57a51c,#1f4fb4);"
-        "box-shadow:0 8px 14px "
+        "background:"
+        "linear-gradient("
+        "90deg,#57a51c,#1f4fb4"
+        ");"
+        "box-shadow:"
+        "0 8px 14px "
         "rgba(0,0,0,.45);"
     )
 
@@ -1957,7 +2009,8 @@ def build_html(
     )
 
     h3 = (
-        '<h3 style="text-align:center">'
+        '<h3 style="'
+        'text-align:center">'
         '{}'
         '</h3>'
     )
@@ -2003,589 +2056,24 @@ def build_html(
     ]
 
     parts = [
-        f'<div style="text-align:center">'
-        f'<img src="{img_url(thumb_id)}" '
-        f'alt="{title}" '
-        f'width="270" '
-        f'style="max-width:60%;'
-        f'height:auto;'
-        f'border-radius:8px"/>'
-        f'</div>',
 
-        f'<p style="text-align:center">'
-        f'<b>{title}{ytxt}</b>'
-        f'{" - " + lang + " film" if lang_known else ""}'
-        f'</p>',
-    ]
-
-    if meta["tagline"]:
-
-        parts.append(
-            f'<p style="text-align:center">'
-            f'<i>{e(meta["tagline"])}</i>'
-            f'</p>'
-        )
-
-    parts.append(
-        f"<p>{syn[0]}</p>"
-    )
-
-    parts.append(
-        h3.format("Movie Info")
-    )
-
-    parts.append(
-        "<p>"
-        + "<br/>".join(info)
-        + "</p>"
-    )
-
-    parts.append(
-        h3.format(
-            "Movie Synopsis / Plot"
-        )
-    )
-
-    parts += [
-        f"<p>{p}</p>"
-        for p in syn
-    ]
-
-    # ---------- VCDN PLAYER ----------
-
-    parts.append(
-        f"<h3>Watch {title} Online</h3>"
-    )
-
-    embed_url = vcdn[
-        "embed_url"
-    ]
-
-    parts.append(
-        f'<div style="width:100%;'
-        f'max-width:100%;'
-        f'background:#000;'
-        f'border-radius:8px;'
-        f'overflow:hidden;'
-        f'margin:0 auto 24px">'
-
-        f'<iframe '
-        f'src="{e(embed_url, quote=True)}" '
-        f'width="100%" '
-        f'height="420" '
-        f'frameborder="0" '
-        f'allow="autoplay; '
-        f'encrypted-media; '
-        f'picture-in-picture" '
-        f'allowfullscreen="true" '
-        f'style="border:0;'
-        f'display:block">'
-        f'</iframe>'
-
-        f'</div>'
-    )
-
-    parts.append(
-        '<p style="text-align:center;'
-        'font-size:13px;'
-        'opacity:.8">'
-        'Adaptive streaming player powered by VCDN.'
-        '</p>'
-    )
-
-    if review:
-
-        parts.append(
-            h3.format(
-                f"{title} - "
-                "Film Review and Analysis"
-            )
-        )
-
-        parts += [
-            f"<p>{p}</p>"
-            for p in review
-        ]
-
-    if meta["themes"]:
-
-        parts.append(
-            h3.format("Themes")
-        )
-
-        parts.append(
-            "<ul>"
-            + "".join(
-                f"<li>{e(t)}</li>"
-                for t in meta["themes"]
-            )
-            + "</ul>"
-        )
-
-    parts.append(
-        h3.format("Screenshots")
-    )
-
-    for fid in shot_ids:
-
-        parts.append(
-            f'<p style="text-align:center">'
-            f'<img src="{img_url(fid)}" '
-            f'alt="{title} screenshot" '
-            f'style="max-width:100%;'
-            f'height:auto"/>'
-            f'</p>'
-        )
-
-    parts.append(hr)
-
-    parts.append(
-        h3.format("Download Links")
-    )
-
-    # IMPORTANT:
-    # Download system is intentionally unchanged
-    # for this test run.
-
-    for h, fid, size in outputs:
-
-        direct = (
-            f"https://drive.usercontent.google.com/"
-            f"download?id={fid}"
-            f"&amp;export=download"
-            f"&amp;confirm=t"
-        )
-
-        parts.append(
-            f'<h4 style="{head}">'
-            f'{title}{ytxt}{lang_tag} '
-            f'{h}p x264 '
-            f'{fps_txt}fps '
-            f'[{human(size)}]'
-            f'</h4>'
-        )
-
-        parts.append(
-            f'<a class="mv-dl" '
-            f'data-fid="{fid}" '
-            f'href="{direct}" '
-            f'rel="noopener" '
-            f'style="{btn}">'
-            '&#11015;&#9889;'
-            'DOWNLOAD NOW'
-            '&#9889;&#11015;'
-            f'</a>'
-        )
-
-    parts.append(hr)
-
-    if meta["faq"]:
-
-        parts.append(
-            h3.format(
-                f"{title} - FAQ"
-            )
-        )
-
-        for f in meta["faq"]:
-
-            parts.append(
-                f"<h4>"
-                f"{e(str(f['q']))}"
-                f"</h4>"
-                f"<p>"
-                f"{e(str(f['a']))}"
-                f"</p>"
-            )
-
-    parts.append(
-        '<h3 style="text-align:center;'
-        'color:#f0a0ff">'
-        'Winding Up &#10084;&#65039;'
-        '</h3>'
-    )
-
-    parts.append(
-        TIMER_SCRIPT
-    )
-
-    return "\n".join(parts)
-
-
-# ============================================================
-# MAIN PIPELINE
-# ============================================================
-
-def process(
-    video,
-    processed_folder,
-    output_folder,
-):
-
-    name = video["name"]
-
-    log(
-        f"\n=== Processing: {name} ==="
-    )
-
-    job = (
-        WORK
-        / video["id"]
-    )
-
-    job.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    src = str(
-        job
-        / "source.mp4"
-    )
-
-    slug = (
-        re.sub(
-            r"[^a-zA-Z0-9]+",
-            "-",
-            Path(name).stem,
-        )
-        .strip("-")
-        .lower()
-        or "movie"
-    )
-
-    log(
-        "Downloading original..."
-    )
-
-    download(
-        video["id"],
-        src,
-    )
-
-    dur, w, h, fps = probe(
-        src
-    )
-
-    short = min(w, h)
-
-    log(
-        f"Duration {dur / 60:.1f} min, "
-        f"{w}x{h}, "
-        f"{fps:.2f} fps"
-    )
-
-    log(
-        "Making screenshots and thumbnail..."
-    )
-
-    shots = make_screenshots(
-        src,
-        dur,
-        job,
-    )
-
-    thumb = make_thumbnail(
-        src,
-        dur,
-        w,
-        h,
-        job,
-    )
-
-    log(
-        "Analysing with Gemini..."
-    )
-
-    site_labels = (
-        get_site_labels()
-    )
-
-    frames, audio = (
-        analysis_inputs(
-            src,
-            dur,
-            job,
-        )
-    )
-
-    meta = analyze(
-        name,
-        frames,
-        audio,
-        site_labels,
-    )
-
-    log(
-        "  Title:",
-        meta["title"],
-    )
-
-    log(
-        "  Labels:",
-        meta["labels"],
-    )
-
-    targets = sorted({
-        t
-        for t in RESOLUTIONS
-        if t <= short * 1.05
-    }) or [short]
-
-    outputs = []
-
-    vcdn = None
-
-    # Keep highest generated resolution
-    # for VCDN streaming.
-    vcdn_target = max(
-        targets
-    )
-
-    for t in targets:
-
-        out = str(
-            job
-            / f"{slug}_{t}p.mp4"
-        )
-
-        log(
-            f"Converting to {t}p..."
-        )
-
-        transcode(
-            src,
-            t,
-            w,
-            h,
-            out,
-        )
-
-        size = os.path.getsize(
-            out
-        )
-
-        # --------------------------------------------------
-        # CURRENT TEST:
-        # Converted video still goes to Drive.
-        # This keeps the existing website download
-        # system unchanged.
-        # --------------------------------------------------
-
-        log(
-            f"Uploading {t}p "
-            f"to Google Drive "
-            f"({human(size)})..."
-        )
-
-        fid = upload_public(
-            out,
-            output_folder,
-            "video/mp4",
-        )
-
-        outputs.append(
-            (
-                t,
-                fid,
-                size,
-            )
-        )
-
-        # --------------------------------------------------
-        # VCDN TEST
-        # --------------------------------------------------
-
-        if t == vcdn_target:
-
-            vcdn = vcdn_upload(
-                out,
-                meta["title"],
-            )
-
-        # Free GitHub Actions disk
-        os.remove(out)
-
-    if (
-        not vcdn
-        or not vcdn.get("embed_url")
-    ):
-
-        raise RuntimeError(
-            "VCDN upload did not return "
-            "an embeddable player URL."
-        )
-
-    log(
-        "Uploading images..."
-    )
-
-    thumb_id = upload_public(
-        thumb,
-        output_folder,
-        "image/jpeg",
-    )
-
-    shot_ids = [
-        upload_public(
-            p,
-            output_folder,
-            "image/jpeg",
-        )
-        for p in shots
-    ]
-
-    labels = list(
-        meta["labels"]
-    )
-
-    if not labels:
-
-        unc = next(
-            (
-                l
-                for l in site_labels
-                if l.lower()
-                == "uncategorized"
-            ),
-            None,
-        )
-
-        labels = (
-            [unc]
-            if unc
-            else (
-                [
-                    g
-                    for g
-                    in meta["genres"]
-                ][:2]
-                + [
-                    meta["language"]
-                ]
-            )
-        )
-
-    labels = [
-        str(l)[:40]
-        for l in labels
-        if l
-    ][:8]
-
-    content = build_html(
-        meta,
-        thumb_id,
-        shot_ids,
-        outputs,
-        fps,
-        dur,
-        vcdn,
-    )
-
-    ytxt = (
-        f' ({meta["release_year"]})'
-        if meta["release_year"]
-        else ""
-    )
-
-    ltxt = (
-        f' {meta["language"]}'
-        if meta["language"].lower()
-        != "unknown"
-        else ""
-    )
-
-    body = {
-        "kind": "blogger#post",
-        "title": (
-            f'{meta["title"]}'
-            f'{ytxt}'
-            f'{ltxt}'
-            ' Movie - Watch Online & Download'
+        (
+            '<div style="text-align:center">'
+            f'<img src="{img_url(thumb_id)}" '
+            f'alt="{title}" '
+            'width="270" '
+            'style="max-width:60%;'
+            'height:auto;'
+            'border-radius:8px"/>'
+            '</div>'
         ),
-        "content": content,
-        "labels": labels,
-    }
 
-    post = retry(
-        lambda: blogger.posts().insert(
-            blogId=BLOG_ID,
-            body=body,
-            isDraft=not PUBLISH,
-        ).execute()
-    )
-
-    log(
-        "Blogger post created:",
-        post.get("url")
-        or post.get("id"),
-        "(DRAFT)"
-        if not PUBLISH
-        else "(PUBLISHED)",
-    )
-
-    drive.files().update(
-        fileId=video["id"],
-        addParents=processed_folder,
-        removeParents=INPUT_FOLDER,
-        fields="id",
-    ).execute()
-
-    shutil.rmtree(
-        job,
-        ignore_errors=True,
-    )
-
-
-def main():
-
-    WORK.mkdir(
-        exist_ok=True
-    )
-
-    videos = list_videos()
-
-    if not videos:
-
-        log(
-            "No new videos in the input folder. "
-            "Nothing to do."
-        )
-
-        return 0
-
-    processed = ensure_folder(
-        "_processed"
-    )
-
-    output = ensure_folder(
-        "_output"
-    )
-
-    failed = 0
-
-    for v in videos[:MAX_VIDEOS]:
-
-        try:
-
-            process(
-                v,
-                processed,
-                output,
+        (
+            '<p style="text-align:center">'
+            f'<b>{title}{ytxt}</b>'
+            + (
+                f' - {lang} film'
+                if lang_known
+                else ""
             )
-
-        except Exception:
-
-            failed += 1
-
-            traceback.print_exc()
-
-    return (
-        1
-        if failed
-        else 0
-    )
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+           
