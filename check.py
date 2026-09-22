@@ -1,22 +1,41 @@
-import os
+name: Movie Bot
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+on:
+  workflow_dispatch:
 
-creds = Credentials(
-    None,
-    refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
-    token_uri="https://oauth2.googleapis.com/token",
-    client_id=os.environ["GOOGLE_CLIENT_ID"],
-    client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-)
-creds.refresh(Request())
-drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-folder = os.environ["DRIVE_INPUT_FOLDER_ID"]
-q = f"'{folder}' in parents and mimeType contains 'video/' and trashed=false"
-res = drive.files().list(q=q, fields="files(id)", pageSize=1).execute()
-found = "true" if res.get("files") else "false"
-print("has_video =", found)
-with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-    f.write(f"has_video={found}\n")
+jobs:
+  movie-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check files
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Files:"
+          ls -la
+          echo "Python files:"
+          find . -maxdepth 3 -type f -name "*.py" -print
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Movie Bot
+        env:
+          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
+          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
+          IA_IDENTIFIER_PREFIX: movie-bot
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          python bot.py
