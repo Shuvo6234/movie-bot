@@ -31,8 +31,7 @@ jobs:
           IA_IDENTIFIER_PREFIX: movie-bot
 
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
 
         run: |
-          python movie_bot.py
+          python bot.py
