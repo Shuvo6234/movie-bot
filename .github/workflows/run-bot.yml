@@ -27,6 +27,9 @@ jobs:
       DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
       VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
 
+      STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
+      STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
+
     steps:
       - uses: actions/checkout@v4
 
