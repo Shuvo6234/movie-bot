@@ -1,66 +1,38 @@
-name: Run Movie Bot
+name: Movie Bot
 
 on:
   workflow_dispatch:
-    inputs:
-      publish:
-        description: "Publish directly? (true = publish, false = draft)"
-        default: "false"
-  schedule:
-    - cron: "0 * * * *"   # proti 1 ghonta por por
-
-concurrency:
-  group: movie-bot
-  cancel-in-progress: false
+  push:
+    branches:
+      - main
 
 jobs:
-  run:
+  movie-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
-
-    env:
-      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      BLOG_ID: ${{ secrets.BLOG_ID }}
-      DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
-      VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
-
-      STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
-      STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Check Drive for new video
-        id: check
+      - name: Install dependencies
         run: |
-          pip install google-api-python-client google-auth
-          python check.py
-
-      - name: Free disk space
-        if: steps.check.outputs.has_video == 'true'
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          df -h /
-
-      - name: Install ffmpeg and packages
-        if: steps.check.outputs.has_video == 'true'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run bot
-        if: steps.check.outputs.has_video == 'true'
-        run: python bot.py
+      - name: Run Movie Bot
         env:
-          PUBLISH: ${{ github.event.inputs.publish || 'false' }}
-          RESOLUTIONS: "480,720,1080"
-          MAX_VIDEOS: "1"
-          GEMINI_MODEL: "gemini-3.6-flash"
+          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
+          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
+          IA_IDENTIFIER_PREFIX: movie-bot
+
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+
+        run: |
+          python movie_bot.py
