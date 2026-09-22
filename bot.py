@@ -435,8 +435,8 @@ def vcdn_upload(path, title):
             # Poll the video endpoint until VCDN finishes processing. The
             # documented API exposes GET /api/v1/videos/{id}; this prevents us
             # from publishing a player URL before the video is ready.
-            if status not in ("ready", "processed") or not embed_url:
-                deadline = time.time() + 10 * 60
+            if status not in ("ready", "processed", "complete", "completed") or not embed_url:
+                deadline = time.time() + 45
                 last_video = complete
                 while time.time() < deadline:
                     time.sleep(5)
@@ -477,6 +477,13 @@ def vcdn_upload(path, title):
                         raise RuntimeError(
                             f"VCDN processing failed for {video_id}: {info}"
                         )
+
+            # Do not block the whole GitHub Actions job waiting for VCDN
+            # transcoding. The file can legitimately remain `uploaded` while
+            # VCDN processes it in the background. We already have a stable
+            # video ID, so publish the post and let the player retry/fallback.
+            if status not in ("ready", "processed", "complete", "completed"):
+                log("  VCDN is still processing; continuing without waiting for ready status.")
 
             # The embed URL is deterministic once a video ID exists. If the
             # status endpoint did not return one, construct it as documented.
