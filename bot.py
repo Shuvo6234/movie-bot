@@ -69,13 +69,11 @@ STREAMTAPE_LOGIN = os.environ["STREAMTAPE_LOGIN"].strip()
 STREAMTAPE_KEY = os.environ["STREAMTAPE_KEY"].strip()
 STREAMTAPE_API_HOST = "api.streamtape.com"
 
-# Primary Gemini model
 GEMINI_MODEL = os.environ.get(
     "GEMINI_MODEL",
     "gemini-3.6-flash"
 ).strip()
 
-# Fallback Gemini models
 GEMINI_FALLBACK_MODELS = [
     x.strip()
     for x in os.environ.get(
@@ -145,7 +143,6 @@ VCDN_WAIT_SECONDS = int(
     )
 )
 
-# Gemini retry
 GEMINI_RETRY_ATTEMPTS = int(
     os.environ.get(
         "GEMINI_RETRY_ATTEMPTS",
@@ -202,12 +199,10 @@ def retry(fn, attempts=5, delay=5):
     last_error = None
 
     for attempt in range(1, attempts + 1):
-
         try:
             return fn()
 
         except Exception as error:
-
             last_error = error
 
             if attempt >= attempts:
@@ -218,9 +213,7 @@ def retry(fn, attempts=5, delay=5):
                 f"{error}"
             )
 
-            time.sleep(
-                delay * attempt
-            )
+            time.sleep(delay * attempt)
 
     raise last_error
 
@@ -230,23 +223,52 @@ def retry(fn, attempts=5, delay=5):
 # ============================================================
 
 def run_command(command, check=True):
+    """
+    Run a command and preserve enough output to diagnose
+    FFmpeg/ffprobe failures.
+
+    IMPORTANT:
+    The previous version only returned:
+        exit code 187
+
+    This version also includes the final 80 lines of the
+    command output in the exception.
+    """
+
+    command = [
+        str(item)
+        for item in command
+    ]
 
     log(
-        "$ " + " ".join(
-            map(str, command)
+        "$ " + " ".join(command)
+    )
+
+    try:
+        process = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace"
         )
-    )
 
-    process = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"Command not found: {command[0]}. "
+            f"Error: {error}"
+        )
 
-    if process.stdout:
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not execute command: {error}"
+        )
+
+    output = process.stdout or ""
+
+    if output:
         print(
-            process.stdout,
+            output,
             flush=True
         )
 
@@ -254,12 +276,23 @@ def run_command(command, check=True):
         check
         and process.returncode != 0
     ):
-        raise RuntimeError(
-            "Command failed with "
-            f"exit code {process.returncode}"
+        lines = output.strip().splitlines()
+
+        tail = "\n".join(
+            lines[-80:]
         )
 
-    return process.stdout
+        raise RuntimeError(
+            "Command failed with "
+            f"exit code {process.returncode}\n"
+            "Command: "
+            + " ".join(command)
+            + "\n\n"
+            "Last command output:\n"
+            + tail
+        )
+
+    return output
 
 
 # ============================================================
@@ -382,6 +415,23 @@ def download_drive_file(
                     "Drive download: "
                     f"{status.progress() * 100:.1f}%"
                 )
+
+    if not destination.exists():
+        raise RuntimeError(
+            "Google Drive download finished "
+            "but local file does not exist."
+        )
+
+    if destination.stat().st_size <= 0:
+        raise RuntimeError(
+            "Google Drive download produced "
+            "an empty file."
+        )
+
+    log(
+        "Drive download completed: "
+        f"{destination.stat().st_size / 1024 / 1024:.2f} MB"
+    )
 
     return destination
 
@@ -539,7 +589,6 @@ def streamtape_upload_url():
     }
 
     if STREAMTAPE_FOLDER:
-
         params["folder"] = STREAMTAPE_FOLDER
 
     data = streamtape_api(
@@ -735,7 +784,6 @@ def streamtape_list_folder():
     params = {}
 
     if STREAMTAPE_FOLDER:
-
         params["folder"] = STREAMTAPE_FOLDER
 
     data = streamtape_api(
@@ -811,7 +859,6 @@ def streamtape_stable_link(item):
     )
 
     if link:
-
         return str(link)
 
     linkid = item.get(
@@ -868,7 +915,6 @@ def streamtape_find_existing(
             try:
 
                 if int(item_size) != int(size):
-
                     continue
 
             except Exception:
@@ -900,7 +946,6 @@ def streamtape_is_converting(
         )
 
         if item_name != name:
-
             continue
 
         status = str(
@@ -926,7 +971,6 @@ def streamtape_is_converting(
             try:
 
                 if float(progress) >= 100:
-
                     return False
 
             except Exception:
@@ -1276,7 +1320,6 @@ def vcdn_upload_binary(
     path = parsed.path or "/"
 
     if parsed.query:
-
         path += "?" + parsed.query
 
     size = file_path.stat().st_size
@@ -1736,7 +1779,13 @@ def parse_fps(value):
         a, b = value.split("/", 1)
 
         try:
-            return float(a) / float(b)
+            numerator = float(a)
+            denominator = float(b)
+
+            if denominator == 0:
+                return 30.0
+
+            return numerator / denominator
 
         except Exception:
             return 30.0
@@ -1749,6 +1798,9 @@ def parse_fps(value):
 
 
 def fmt_fps(value):
+
+    if not value or value <= 0:
+        return "30"
 
     return (
         f"{value:.3f}"
@@ -1774,17 +1826,33 @@ def probe(path):
         ]
     )
 
-    data = json.loads(output)
-
-    duration = float(
-        data.get(
-            "format",
-            {}
-        ).get(
-            "duration",
-            0
+    try:
+        data = json.loads(
+            output
         )
-    )
+
+    except Exception as error:
+
+        raise RuntimeError(
+            "ffprobe returned invalid JSON: "
+            f"{error}"
+        )
+
+    try:
+
+        duration = float(
+            data.get(
+                "format",
+                {}
+            ).get(
+                "duration",
+                0
+            )
+        )
+
+    except Exception:
+
+        duration = 0.0
 
     video_stream = None
 
@@ -1842,13 +1910,142 @@ def probe(path):
     }
 
 
+def validate_mp4(path):
+
+    path = Path(path)
+
+    if not path.exists():
+
+        raise RuntimeError(
+            "Output file does not exist: "
+            f"{path}"
+        )
+
+    size = path.stat().st_size
+
+    if size <= 0:
+
+        raise RuntimeError(
+            "Output file is empty: "
+            f"{path}"
+        )
+
+    output = run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration,format_name",
+            "-show_entries",
+            "stream=codec_type,codec_name,width,height",
+            "-of",
+            "json",
+            str(path)
+        ]
+    )
+
+    try:
+
+        data = json.loads(
+            output
+        )
+
+    except Exception as error:
+
+        raise RuntimeError(
+            "Generated MP4 returned invalid "
+            f"ffprobe JSON: {error}"
+        )
+
+    streams = data.get(
+        "streams",
+        []
+    )
+
+    video_found = False
+
+    for stream in streams:
+
+        if stream.get(
+            "codec_type"
+        ) == "video":
+
+            video_found = True
+
+            if not stream.get(
+                "width"
+            ) or not stream.get(
+                "height"
+            ):
+
+                raise RuntimeError(
+                    "Generated MP4 video stream "
+                    "has invalid dimensions."
+                )
+
+            break
+
+    if not video_found:
+
+        raise RuntimeError(
+            "Generated MP4 contains "
+            "no video stream."
+        )
+
+    duration = float(
+        data.get(
+            "format",
+            {}
+        ).get(
+            "duration",
+            0
+        ) or 0
+    )
+
+    if duration <= 0:
+
+        raise RuntimeError(
+            "Generated MP4 has invalid duration."
+        )
+
+    log(
+        "MP4 validation successful: "
+        f"{path.name} | "
+        f"{size / 1024 / 1024:.2f} MB | "
+        f"{duration:.2f}s"
+    )
+
+    return True
+
+
 def transcode(
     source,
     output,
     target_height,
     source_fps
 ):
+    """
+    Robust FFmpeg transcoding.
 
+    Main encode:
+      H.264
+      AAC
+      yuv420p
+      MP4
+      faststart
+
+    Explicit stream mapping:
+      0:v:0
+      0:a:0?   optional
+
+    If normal encoding fails, a simpler ultrafast
+    fallback encode is attempted.
+
+    The real FFmpeg error is included in the exception.
+    """
+
+    source = Path(source)
     output = Path(output)
 
     output.parent.mkdir(
@@ -1856,15 +2053,165 @@ def transcode(
         exist_ok=True
     )
 
+    if not source.exists():
+
+        raise RuntimeError(
+            "Source video does not exist: "
+            f"{source}"
+        )
+
+    source_size = source.stat().st_size
+
+    if source_size <= 0:
+
+        raise RuntimeError(
+            "Source video is empty: "
+            f"{source}"
+        )
+
     crf = CRF.get(
         target_height,
         23
     )
 
-    run_command(
-        [
+    fps = fmt_fps(
+        source_fps
+    )
+
+    if output.exists():
+
+        try:
+            output.unlink()
+        except Exception:
+            pass
+
+    log("=" * 70)
+
+    log(
+        f"FFmpeg transcoding started: "
+        f"{target_height}p"
+    )
+
+    log(
+        f"Input: {source}"
+    )
+
+    log(
+        f"Input size: "
+        f"{source_size / 1024 / 1024:.2f} MB"
+    )
+
+    log(
+        f"Output: {output}"
+    )
+
+    log(
+        f"CRF: {crf}"
+    )
+
+    log(
+        f"FPS: {fps}"
+    )
+
+    # --------------------------------------------------------
+    # NORMAL ENCODE
+    # --------------------------------------------------------
+
+    normal_command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+
+        "-i",
+        str(source),
+
+        # Explicit first video stream.
+        "-map",
+        "0:v:0",
+
+        # First audio stream if one exists.
+        "-map",
+        "0:a:0?",
+
+        # Safe scaling.
+        "-vf",
+        (
+            f"scale=-2:{target_height}:"
+            "force_original_aspect_ratio=decrease"
+        ),
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "veryfast",
+
+        "-crf",
+        str(crf),
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-r",
+        fps,
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "128k",
+
+        # Remove subtitles/data/attachments.
+        "-sn",
+        "-dn",
+
+        "-movflags",
+        "+faststart",
+
+        str(output)
+    ]
+
+    try:
+
+        run_command(
+            normal_command,
+            check=True
+        )
+
+    except Exception as first_error:
+
+        log("=" * 70)
+
+        log(
+            f"NORMAL {target_height}p "
+            "FFMPEG ENCODE FAILED"
+        )
+
+        log(
+            f"{first_error}"
+        )
+
+        log(
+            "Trying simplified FFmpeg "
+            "fallback encode..."
+        )
+
+        if output.exists():
+
+            try:
+                output.unlink()
+            except Exception:
+                pass
+
+        # ----------------------------------------------------
+        # FALLBACK ENCODE
+        # ----------------------------------------------------
+
+        fallback_command = [
             "ffmpeg",
+            "-hide_banner",
             "-y",
+
             "-i",
             str(source),
 
@@ -1875,25 +2222,19 @@ def transcode(
             "0:a:0?",
 
             "-vf",
-            (
-                f"scale=-2:{target_height}:"
-                "force_original_aspect_ratio=decrease"
-            ),
+            f"scale=-2:{target_height}",
 
             "-c:v",
             "libx264",
 
             "-preset",
-            "veryfast",
+            "ultrafast",
 
             "-crf",
-            str(crf),
+            str(crf + 1),
 
             "-pix_fmt",
             "yuv420p",
-
-            "-r",
-            fmt_fps(source_fps),
 
             "-c:a",
             "aac",
@@ -1901,26 +2242,61 @@ def transcode(
             "-b:a",
             "128k",
 
+            "-sn",
+            "-dn",
+
             "-movflags",
             "+faststart",
 
             str(output)
         ]
+
+        try:
+
+            run_command(
+                fallback_command,
+                check=True
+            )
+
+        except Exception as second_error:
+
+            log("=" * 70)
+
+            log(
+                f"SIMPLIFIED {target_height}p "
+                "FFMPEG ENCODE ALSO FAILED"
+            )
+
+            log(
+                f"First error:\n{first_error}"
+            )
+
+            log(
+                f"Second error:\n{second_error}"
+            )
+
+            raise RuntimeError(
+                "FFmpeg transcoding failed.\n\n"
+                f"Target: {target_height}p\n\n"
+                f"Normal encode error:\n"
+                f"{first_error}\n\n"
+                f"Fallback encode error:\n"
+                f"{second_error}"
+            )
+
+    # --------------------------------------------------------
+    # VALIDATE OUTPUT
+    # --------------------------------------------------------
+
+    validate_mp4(
+        output
     )
 
-    if not output.exists():
+    log(
+        f"FFmpeg {target_height}p completed successfully."
+    )
 
-        raise RuntimeError(
-            f"FFmpeg output missing: "
-            f"{output}"
-        )
-
-    if output.stat().st_size <= 0:
-
-        raise RuntimeError(
-            f"FFmpeg output is empty: "
-            f"{output}"
-        )
+    log("=" * 70)
 
     return output
 
@@ -2033,6 +2409,7 @@ def pick_labels(labels):
             result.append(label)
 
     if not result:
+
         result = FALLBACK_LABELS[:3]
 
     return result[:8]
@@ -2130,12 +2507,12 @@ def fallback_movie_title(
         movie_name
     ).stem
 
-    # Correct regex:
-    # Removes things such as:
+    # Remove things such as:
     # (720P_HD)
     # (1080P)
     # [720P]
     # [1080P_HD]
+
     title = re.sub(
         r"[^)]*(?:2160P|1080P|720P|480P|HD|FHD|UHD)[^)]*",
         "",
@@ -2261,8 +2638,6 @@ def gemini_generate_with_retry(
                 f"{GEMINI_RETRY_ATTEMPTS}"
             )
 
-            # Simple string contents intentionally used.
-            # This avoids the previous AFC warning.
             response = (
                 gemini.models.generate_content(
                     model=model,
@@ -2380,1405 +2755,4 @@ Required format:
 Rules:
 
 - Create a clean movie title.
-- Do not include resolution such as 480p, 720p or 1080p.
-- Do not invent cast information.
-- Do not invent ratings.
-- Do not invent unsupported facts.
-- Description should be useful for a movie website.
-- Review should be neutral and concise.
-- Review must not contain major spoilers.
-- Themes should be concise.
-- Labels should be simple movie genres/topics.
-- Return JSON only.
-"""
-
-    models = []
-
-    if GEMINI_MODEL:
-
-        models.append(
-            GEMINI_MODEL
-        )
-
-    for model in GEMINI_FALLBACK_MODELS:
-
-        if (
-            model
-            and model not in models
-        ):
-
-            models.append(
-                model
-            )
-
-    last_error = None
-
-    for index, model in enumerate(
-        models,
-        start=1
-    ):
-
-        log("=" * 70)
-
-        log(
-            "Gemini metadata model "
-            f"{index}/{len(models)}: "
-            f"{model}"
-        )
-
-        try:
-
-            raw_text = (
-                gemini_generate_with_retry(
-                    gemini,
-                    model,
-                    prompt
-                )
-            )
-
-            data = clean_gemini_json(
-                raw_text
-            )
-
-            if not isinstance(
-                data,
-                dict
-            ):
-
-                raise RuntimeError(
-                    "Gemini JSON response "
-                    "is not an object."
-                )
-
-            title = str(
-                data.get(
-                    "title",
-                    ""
-                )
-            ).strip()
-
-            if not title:
-
-                title = fallback_movie_title(
-                    movie_name
-                )
-
-            description = str(
-                data.get(
-                    "description",
-                    ""
-                )
-            ).strip()
-
-            review = str(
-                data.get(
-                    "review",
-                    ""
-                )
-            ).strip()
-
-            themes = str(
-                data.get(
-                    "themes",
-                    ""
-                )
-            ).strip()
-
-            labels = pick_labels(
-                data.get(
-                    "labels",
-                    []
-                )
-            )
-
-            if not description:
-
-                description = (
-                    f"Watch {title} online "
-                    "and choose from the "
-                    "available download "
-                    "quality options."
-                )
-
-            if not review:
-
-                review = (
-                    f"{title} is available "
-                    "for online viewing and "
-                    "download."
-                )
-
-            if not themes:
-
-                themes = (
-                    "Movie, Entertainment"
-                )
-
-            result = {
-                "title": title,
-                "description": description,
-                "review": review,
-                "themes": themes,
-                "labels": labels
-            }
-
-            log(
-                "Gemini metadata parsed "
-                "successfully."
-            )
-
-            log(
-                f"Generated title: {title}"
-            )
-
-            log(
-                "Labels: "
-                + ", ".join(labels)
-            )
-
-            return result
-
-        except Exception as error:
-
-            last_error = error
-
-            log(
-                f"Gemini model {model} failed: "
-                f"{error}"
-            )
-
-            if index < len(models):
-
-                log(
-                    "Trying next Gemini "
-                    f"model: {models[index]}"
-                )
-
-    # --------------------------------------------------------
-    # LOCAL FALLBACK
-    # --------------------------------------------------------
-
-    log("=" * 70)
-
-    log(
-        "ALL GEMINI MODELS FAILED."
-    )
-
-    if last_error:
-
-        log(
-            f"Last Gemini error: "
-            f"{last_error}"
-        )
-
-    log(
-        "Using local fallback metadata."
-    )
-
-    fallback = fallback_movie_metadata(
-        movie_name,
-        duration
-    )
-
-    log(
-        f"Fallback title: "
-        f"{fallback['title']}"
-    )
-
-    return fallback
-
-
-# ============================================================
-# HTML
-# ============================================================
-
-def human(size):
-
-    size = float(size)
-
-    units = [
-        "B",
-        "KB",
-        "MB",
-        "GB",
-        "TB"
-    ]
-
-    for unit in units:
-
-        if size < 1024:
-
-            return (
-                f"{size:.1f} {unit}"
-            )
-
-        size /= 1024
-
-    return (
-        f"{size:.1f} PB"
-    )
-
-
-def as_paragraphs(
-    text
-):
-
-    if not text:
-        return ""
-
-    paragraphs = re.split(
-        r"\n\s*\n",
-        str(text).strip()
-    )
-
-    return "".join(
-        (
-            "<p>"
-            + html.escape(
-                paragraph.strip()
-            )
-            + "</p>"
-        )
-        for paragraph in paragraphs
-        if paragraph.strip()
-    )
-
-
-# ============================================================
-# DOWNLOAD TIMER
-# ============================================================
-
-def TIMER_SCRIPT(
-    wait_seconds
-):
-
-    return f"""
-<script>
-(function() {{
-    const WAIT = {int(wait_seconds)};
-
-    document.addEventListener(
-        "click",
-        function(event) {{
-
-            const button =
-                event.target.closest(
-                    "a.mv-dl[data-url]"
-                );
-
-            if (!button) {{
-                return;
-            }}
-
-            event.preventDefault();
-
-            if (
-                button.dataset.busy === "1"
-            ) {{
-                return;
-            }}
-
-            button.dataset.busy = "1";
-
-            let remaining = WAIT;
-
-            button.innerHTML =
-                "Please wait "
-                + remaining
-                + "s...";
-
-            const timer =
-                setInterval(
-                    function() {{
-
-                        remaining--;
-
-                        if (
-                            remaining <= 0
-                        ) {{
-
-                            clearInterval(timer);
-
-                            const url =
-                                button.getAttribute(
-                                    "data-url"
-                                );
-
-                            if (url) {{
-                                window.location.href =
-                                    url;
-                            }}
-
-                            return;
-                        }}
-
-                        button.innerHTML =
-                            "Please wait "
-                            + remaining
-                            + "s...";
-
-                    }},
-                    1000
-                );
-
-        }},
-        true
-    );
-}})();
-</script>
-"""
-
-
-def build_html(
-    meta,
-    vcdn,
-    outputs,
-    duration
-):
-
-    title = html.escape(
-        meta.get(
-            "title",
-            "Movie"
-        )
-    )
-
-    description = as_paragraphs(
-        meta.get(
-            "description",
-            ""
-        )
-    )
-
-    review = as_paragraphs(
-        meta.get(
-            "review",
-            ""
-        )
-    )
-
-    themes = as_paragraphs(
-        meta.get(
-            "themes",
-            ""
-        )
-    )
-
-    runtime = fmt_runtime(
-        duration
-    )
-
-    labels = meta.get(
-        "labels",
-        []
-    )
-
-    parts = []
-
-    parts.append(
-        f"""
-<div class="movie-box">
-
-<h1>{title}</h1>
-
-<div class="movie-runtime">
-Runtime: {runtime}
-</div>
-
-<div class="movie-description">
-{description}
-</div>
-
-</div>
-"""
-    )
-
-    embed_url = html.escape(
-        str(
-            vcdn["embed"]
-        ),
-        quote=True
-    )
-
-    parts.append(
-        f"""
-<div class="watch-box">
-
-<h2>Watch Online</h2>
-
-<div style="
-position:relative;
-width:100%;
-aspect-ratio:16/9;
-background:#000;
-overflow:hidden;
-">
-
-<iframe
-src="{embed_url}"
-style="
-width:100%;
-height:100%;
-border:0;
-"
-allowfullscreen
-allow="autoplay; fullscreen"
-loading="lazy">
-</iframe>
-
-</div>
-
-</div>
-"""
-    )
-
-    if review:
-
-        parts.append(
-            f"""
-<div class="review-box">
-
-<h2>Review</h2>
-
-{review}
-
-</div>
-"""
-        )
-
-    if themes:
-
-        parts.append(
-            f"""
-<div class="themes-box">
-
-<h2>Themes</h2>
-
-{themes}
-
-</div>
-"""
-        )
-
-    button_style = """
-display:block;
-width:100%;
-box-sizing:border-box;
-padding:14px 18px;
-margin:10px 0;
-border-radius:8px;
-background:#111;
-color:#fff;
-text-decoration:none;
-text-align:center;
-font-weight:700;
-border:1px solid #333;
-"""
-
-    buttons = []
-
-    for resolution, streamtape, size in outputs:
-
-        stream_url = html.escape(
-            str(
-                streamtape["link"]
-            ),
-            quote=True
-        )
-
-        buttons.append(
-            f"""
-<a
-class="mv-dl"
-data-url="{stream_url}"
-href="{stream_url}"
-style="{button_style}"
-rel="nofollow noopener"
->
-Download {resolution}p
-&nbsp;({human(size)})
-</a>
-"""
-        )
-
-    parts.append(
-        f"""
-<div class="download-box">
-
-<h2>Download</h2>
-
-<div>
-{"".join(buttons)}
-</div>
-
-</div>
-"""
-    )
-
-    if labels:
-
-        labels_html = " ".join(
-            (
-                "<span>"
-                + html.escape(
-                    str(label)
-                )
-                + "</span>"
-            )
-            for label in labels
-        )
-
-        parts.append(
-            f"""
-<div class="movie-meta">
-
-<div>
-{labels_html}
-</div>
-
-</div>
-"""
-        )
-
-    parts.append(
-        TIMER_SCRIPT(
-            WAIT_SECONDS
-        )
-    )
-
-    return "\n".join(parts)
-
-
-# ============================================================
-# BLOGGER
-# ============================================================
-
-def verify_blogger_access(
-    blogger
-):
-
-    log(
-        "Checking Blogger blog access..."
-    )
-
-    try:
-
-        blog = (
-            blogger.blogs()
-            .get(
-                blogId=BLOG_ID
-            )
-            .execute()
-        )
-
-    except Exception as error:
-
-        raise RuntimeError(
-            "Cannot access Blogger blog. "
-            "Check BLOG_ID and Blogger OAuth "
-            f"permissions. Error: {error}"
-        )
-
-    returned_id = str(
-        blog.get(
-            "id",
-            ""
-        )
-    )
-
-    if returned_id != str(
-        BLOG_ID
-    ):
-
-        raise RuntimeError(
-            "Blogger returned a different "
-            "blog ID. "
-            f"Expected={BLOG_ID}, "
-            f"Got={returned_id}"
-        )
-
-    log(
-        "Blogger blog verified:"
-    )
-
-    log(
-        f"Blog name: {blog.get('name')}"
-    )
-
-    log(
-        f"Blog URL: {blog.get('url')}"
-    )
-
-    return blog
-
-
-def create_blogger_post(
-    blogger,
-    title,
-    content,
-    labels
-):
-
-    log(
-        "Creating Blogger post..."
-    )
-
-    log(
-        f"Blogger Blog ID: {BLOG_ID}"
-    )
-
-    log(
-        f"Publish mode: {PUBLISH}"
-    )
-
-    log(
-        f"Draft mode: {not PUBLISH}"
-    )
-
-    body = {
-        "kind": "blogger#post",
-        "title": title,
-        "content": content,
-        "labels": labels
-    }
-
-    try:
-
-        result = (
-            blogger.posts()
-            .insert(
-                blogId=BLOG_ID,
-                body=body,
-                isDraft=not PUBLISH
-            )
-            .execute()
-        )
-
-    except Exception as error:
-
-        log(
-            "BLOGGER INSERT FAILED:"
-        )
-
-        log(
-            str(error)
-        )
-
-        raise
-
-    post_id = result.get(
-        "id"
-    )
-
-    post_url = result.get(
-        "url"
-    )
-
-    status = result.get(
-        "status"
-    )
-
-    log(
-        "BLOGGER INSERT RESPONSE:"
-    )
-
-    log(
-        f"Post ID: {post_id}"
-    )
-
-    log(
-        f"Post URL: {post_url}"
-    )
-
-    log(
-        f"Post status: {status}"
-    )
-
-    if not post_id:
-
-        raise RuntimeError(
-            "Blogger API returned success "
-            "but no Post ID."
-        )
-
-    # --------------------------------------------------------
-    # VERIFY POST
-    # --------------------------------------------------------
-
-    log(
-        "Verifying Blogger post..."
-    )
-
-    verified = None
-    verify_error = None
-
-    for attempt in range(1, 6):
-
-        try:
-
-            verified = (
-                blogger.posts()
-                .get(
-                    blogId=BLOG_ID,
-                    postId=str(post_id),
-                    fetchBody=False
-                )
-                .execute()
-            )
-
-            break
-
-        except Exception as error:
-
-            verify_error = error
-
-            log(
-                "Blogger verification "
-                f"attempt {attempt}/5 failed: "
-                f"{error}"
-            )
-
-            if attempt < 5:
-
-                time.sleep(3)
-
-    if not verified:
-
-        raise RuntimeError(
-            "Blogger post was inserted but "
-            "could not be verified. "
-            f"Last error: {verify_error}"
-        )
-
-    verified_id = verified.get(
-        "id"
-    )
-
-    if str(
-        verified_id
-    ) != str(
-        post_id
-    ):
-
-        raise RuntimeError(
-            "Blogger verification returned "
-            "a different Post ID."
-        )
-
-    verified_status = verified.get(
-        "status"
-    )
-
-    verified_url = verified.get(
-        "url"
-    )
-
-    log(
-        "BLOGGER POST VERIFIED SUCCESSFULLY."
-    )
-
-    log(
-        f"Verified Post ID: {verified_id}"
-    )
-
-    log(
-        f"Verified status: {verified_status}"
-    )
-
-    log(
-        f"Verified URL: {verified_url}"
-    )
-
-    if PUBLISH:
-
-        if verified_status not in {
-            None,
-            "LIVE"
-        }:
-
-            raise RuntimeError(
-                "Publish was requested, but "
-                "Blogger verification returned "
-                f"status={verified_status}"
-            )
-
-    return verified
-
-
-# ============================================================
-# PROCESS ONE MOVIE
-# ============================================================
-
-def process_movie(
-    drive,
-    blogger,
-    file_info,
-    gemini
-):
-
-    file_id = file_info["id"]
-    original_name = file_info["name"]
-
-    log("=" * 70)
-
-    log(
-        "STARTING MOVIE:"
-    )
-
-    log(
-        original_name
-    )
-
-    log(
-        f"Drive file ID: {file_id}"
-    )
-
-    safe_work_name = re.sub(
-        r"[^A-Za-z0-9._-]+",
-        "_",
-        Path(original_name).stem
-    )
-
-    movie_work = (
-        WORK
-        / safe_work_name
-    )
-
-    if movie_work.exists():
-
-        shutil.rmtree(
-            movie_work
-        )
-
-    movie_work.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    source_path = (
-        movie_work
-        / original_name
-    )
-
-    try:
-
-        # ====================================================
-        # 1. DOWNLOAD SOURCE
-        # ====================================================
-
-        download_drive_file(
-            drive,
-            file_id,
-            source_path
-        )
-
-        # ====================================================
-        # 2. PROBE
-        # ====================================================
-
-        info = probe(
-            source_path
-        )
-
-        log(
-            "Video information:"
-        )
-
-        log(
-            f"Resolution: "
-            f"{info['width']}x{info['height']}"
-        )
-
-        log(
-            f"FPS: "
-            f"{info['fps']}"
-        )
-
-        log(
-            f"Duration: "
-            f"{info['duration']:.2f}s"
-        )
-
-        # ====================================================
-        # 3. TARGET RESOLUTIONS
-        # ====================================================
-
-        targets = target_resolutions(
-            info["width"],
-            info["height"]
-        )
-
-        log(
-            "Target resolutions: "
-            + ", ".join(
-                f"{x}p"
-                for x in targets
-            )
-        )
-
-        # ====================================================
-        # 4. GEMINI
-        # ====================================================
-
-        log(
-            "Generating movie metadata..."
-        )
-
-        meta = analyze(
-            gemini,
-            original_name,
-            info["duration"]
-        )
-
-        log(
-            f"Generated title: "
-            f"{meta['title']}"
-        )
-
-        log(
-            "Labels: "
-            + ", ".join(
-                meta["labels"]
-            )
-        )
-
-        # ====================================================
-        # 5. FFMPEG
-        # ====================================================
-
-        outputs = []
-
-        for resolution in targets:
-
-            output_path = (
-                movie_work
-                / f"{Path(original_name).stem}"
-                f"_{resolution}p.mp4"
-            )
-
-            log(
-                f"Creating {resolution}p..."
-            )
-
-            transcode(
-                source_path,
-                output_path,
-                resolution,
-                info["fps"]
-            )
-
-            outputs.append(
-                {
-                    "resolution": resolution,
-                    "path": output_path
-                }
-            )
-
-        # ====================================================
-        # 6. STREAMTAPE
-        # ====================================================
-
-        stream_outputs = []
-
-        for item in outputs:
-
-            resolution = item["resolution"]
-            output_path = item["path"]
-
-            log(
-                f"Uploading {resolution}p "
-                "to Streamtape..."
-            )
-
-            streamtape = (
-                streamtape_upload_and_wait(
-                    output_path
-                )
-            )
-
-            stream_outputs.append(
-                (
-                    resolution,
-                    streamtape,
-                    output_path.stat().st_size
-                )
-            )
-
-            log(
-                f"Streamtape {resolution}p ready: "
-                f"{streamtape['link']}"
-            )
-
-        # ====================================================
-        # 7. VCDN - HIGHEST QUALITY ONLY
-        # ====================================================
-
-        highest = max(
-            outputs,
-            key=lambda x: x["resolution"]
-        )
-
-        log(
-            "Highest generated resolution: "
-            f"{highest['resolution']}p"
-        )
-
-        vcdn = vcdn_upload(
-            highest["path"]
-        )
-
-        # ====================================================
-        # 8. BLOGGER HTML
-        # ====================================================
-
-        content = build_html(
-            meta,
-            vcdn,
-            stream_outputs,
-            info["duration"]
-        )
-
-        # ====================================================
-        # 9. VERIFY BLOGGER
-        # ====================================================
-
-        verify_blogger_access(
-            blogger
-        )
-
-        # ====================================================
-        # 10. CREATE BLOGGER POST
-        # ====================================================
-
-        blogger_post = (
-            create_blogger_post(
-                blogger,
-                meta["title"],
-                content,
-                meta["labels"]
-            )
-        )
-
-        # ====================================================
-        # 11. FINAL VERIFICATION
-        # ====================================================
-
-        blogger_post_id = blogger_post.get(
-            "id"
-        )
-
-        blogger_post_url = blogger_post.get(
-            "url"
-        )
-
-        if not blogger_post_id:
-
-            raise RuntimeError(
-                "Blogger post has no ID. "
-                "Drive source will NOT be deleted."
-            )
-
-        log("=" * 50)
-
-        log(
-            "BLOGGER POST VERIFIED"
-        )
-
-        log(
-            f"Post ID: {blogger_post_id}"
-        )
-
-        log(
-            f"Post URL: {blogger_post_url}"
-        )
-
-        log("=" * 50)
-
-        # ====================================================
-        # 12. DELETE DRIVE SOURCE
-        # ====================================================
-
-        log(
-            "All upload and Blogger checks "
-            "passed."
-        )
-
-        log(
-            "Deleting original Drive source..."
-        )
-
-        delete_drive_file(
-            drive,
-            file_id
-        )
-
-        # ====================================================
-        # SUCCESS
-        # ====================================================
-
-        log(
-            "POST DONE"
-        )
-
-        log(
-            f"Title: {meta['title']}"
-        )
-
-        log(
-            f"Blogger URL: {blogger_post_url}"
-        )
-
-        log(
-            f"Drive source deleted: {file_id}"
-        )
-
-        return True
-
-    except Exception as error:
-
-        log("=" * 70)
-
-        log(
-            "MOVIE PROCESSING FAILED"
-        )
-
-        log(
-            f"Movie: {original_name}"
-        )
-
-        log(
-            f"Error: {error}"
-        )
-
-        log(
-            "Original Google Drive source "
-            "will NOT be deleted."
-        )
-
-        log("=" * 70)
-
-        traceback.print_exc()
-
-        return False
-
-    finally:
-
-        # Only local GitHub Actions files.
-        try:
-
-            if movie_work.exists():
-
-                shutil.rmtree(
-                    movie_work,
-                    ignore_errors=True
-                )
-
-                log(
-                    "Local work files cleaned."
-                )
-
-        except Exception as cleanup_error:
-
-            log(
-                "Local cleanup warning: "
-                f"{cleanup_error}"
-            )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    log("=" * 70)
-
-    log(
-        "MOVIE BOT STARTING"
-    )
-
-    log(
-        f"Publish mode: {PUBLISH}"
-    )
-
-    log(
-        "Google Drive is temporary source only."
-    )
-
-    log(
-        "No output will be uploaded to Drive."
-    )
-
-    log("=" * 70)
-
-    WORK.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    try:
-
-        # ----------------------------------------------------
-        # GOOGLE
-        # ----------------------------------------------------
-
-        log(
-            "Connecting to Google..."
-        )
-
-        drive, blogger = google_clients()
-
-        # ----------------------------------------------------
-        # BLOGGER
-        # ----------------------------------------------------
-
-        verify_blogger_access(
-            blogger
-        )
-
-        # ----------------------------------------------------
-        # GEMINI
-        # ----------------------------------------------------
-
-        log(
-            "Connecting to Gemini..."
-        )
-
-        gemini = genai.Client(
-            api_key=GEMINI_KEY
-        )
-
-        # ----------------------------------------------------
-        # DRIVE
-        # ----------------------------------------------------
-
-        videos = list_videos(
-            drive
-        )
-
-        log(
-            f"Found {len(videos)} video(s)."
-        )
-
-        if not videos:
-
-            log(
-                "No videos found."
-            )
-
-            return
-
-        videos = videos[:MAX_VIDEOS]
-
-        successful = 0
-        failed = 0
-
-        # ----------------------------------------------------
-        # PROCESS VIDEOS
-        # ----------------------------------------------------
-
-        for index, file_info in enumerate(
-            videos,
-            start=1
-        ):
-
-            log("=" * 70)
-
-            log(
-                f"Processing video "
-                f"{index}/{len(videos)}"
-            )
-
-            success = process_movie(
-                drive,
-                blogger,
-                file_info,
-                gemini
-            )
-
-            if success:
-
-                successful += 1
-
-            else:
-
-                failed += 1
-
-        # ----------------------------------------------------
-        # SUMMARY
-        # ----------------------------------------------------
-
-        log("=" * 70)
-
-        log(
-            "MOVIE BOT FINISHED"
-        )
-
-        log(
-            f"Successful: {successful}"
-        )
-
-        log(
-            f"Failed: {failed}"
-        )
-
-        log("=" * 70)
-
-        # GitHub Actions should show failure
-        # when a movie could not be processed.
-        if failed > 0:
-
-            sys.exit(1)
-
-    except Exception as error:
-
-        log("=" * 70)
-
-        log(
-            "FATAL BOT ERROR"
-        )
-
-        log(
-            f"{error}"
-        )
-
-        log("=" * 70)
-
-        traceback.print_exc()
-
-        sys.exit(1)
-
-    finally:
-
-        # ----------------------------------------------------
-        # GLOBAL LOCAL CLEANUP
-        # ----------------------------------------------------
-
-        try:
-
-            if WORK.exists():
-
-                shutil.rmtree(
-                    WORK,
-                    ignore_errors=True
-                )
-
-                log(
-                    "Global local work directory cleaned."
-                )
-
-        except Exception as cleanup_error:
-
-            log(
-                "Global cleanup warning: "
-                f"{cleanup_error}"
-            )
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-
-    main()
+- Do not include resolution such as 480p, 720p or 1080p
