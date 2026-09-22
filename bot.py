@@ -1,3250 +1,406 @@
-"""
-Movie Bot:
-Google Drive -> screenshots + 9:16 thumbnail
--> FFmpeg multi-resolution
--> VCDN Watch Online
--> Google Drive download files
--> Gemini title/description/labels
--> Blogger post
-
-Runs on GitHub Actions.
-All settings come from environment variables.
-"""
-
-import html
-import http.client
-import json
-import os
-import re
-import shutil
-import subprocess
-import sys
-import time
-import traceback
-import urllib.error
-import urllib.parse
-import urllib.request
+"""Movie Bot: Drive source -> FFmpeg -> Streamtape + VCDN -> Blogger."""
+import hashlib, html, http.client, json, os, re, shutil, subprocess, sys, time, traceback
+import urllib.error, urllib.parse, urllib.request
 from pathlib import Path
-
 from google import genai
 from google.auth.transport.requests import Request
 from google.genai import types
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload
 
+CLIENT_ID=os.environ["GOOGLE_CLIENT_ID"]
+CLIENT_SECRET=os.environ["GOOGLE_CLIENT_SECRET"]
+REFRESH_TOKEN=os.environ["GOOGLE_REFRESH_TOKEN"]
+GEMINI_KEY=os.environ["GEMINI_API_KEY"]
+BLOG_ID=os.environ["BLOG_ID"]
+INPUT_FOLDER=os.environ["DRIVE_INPUT_FOLDER_ID"]
+VCDN_API_KEY=os.environ["VCDN_API_KEY"].strip()
+STREAMTAPE_LOGIN=os.environ["STREAMTAPE_LOGIN"].strip()
+STREAMTAPE_KEY=os.environ["STREAMTAPE_KEY"].strip()
+STREAMTAPE_FOLDER=os.environ.get("STREAMTAPE_FOLDER","").strip()
+GEMINI_MODEL=os.environ.get("GEMINI_MODEL","gemini-3.6-flash").strip()
+RESOLUTIONS=sorted({int(x) for x in os.environ.get("RESOLUTIONS","480,720,1080").split(",") if x.strip().isdigit()})
+MAX_VIDEOS=int(os.environ.get("MAX_VIDEOS","1"))
+PUBLISH=os.environ.get("PUBLISH","false").lower()=="true"
+LANGUAGE_HINT=os.environ.get("LANGUAGE_HINT","").strip()
+AUDIO_MINUTES=int(os.environ.get("AUDIO_MINUTES","10"))
+WAIT_SECONDS=int(os.environ.get("WAIT_SECONDS","20"))
+DIRECTOR_NAME=os.environ.get("DIRECTOR_NAME","").strip()
+WORK=Path("work")
+CRF={480:24,720:23,1080:22,1440:22,2160:21}
+SCOPES=["https://www.googleapis.com/auth/drive","https://www.googleapis.com/auth/blogger"]
 
-# ============================================================
-# SETTINGS
-# ============================================================
-
-CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
-CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
-REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
-
-GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-
-BLOG_ID = os.environ["BLOG_ID"]
-INPUT_FOLDER = os.environ["DRIVE_INPUT_FOLDER_ID"]
-
-VCDN_API_KEY = os.environ["VCDN_API_KEY"].strip()
-VCDN_API_HOST = "cdn.vcdn.me"
-
-GEMINI_MODEL = os.environ.get(
-    "GEMINI_MODEL",
-    "gemini-3.6-flash"
-).strip()
-
-RESOLUTIONS = sorted({
-    int(x.strip())
-    for x in os.environ.get(
-        "RESOLUTIONS",
-        "480,720,1080"
-    ).split(",")
-    if x.strip().isdigit()
-})
-
-MAX_VIDEOS = int(
-    os.environ.get("MAX_VIDEOS", "1")
-)
-
-PUBLISH = (
-    os.environ.get(
-        "PUBLISH",
-        "false"
-    ).lower() == "true"
-)
-
-LANGUAGE_HINT = os.environ.get(
-    "LANGUAGE_HINT",
-    ""
-).strip()
-
-AUDIO_MINUTES = int(
-    os.environ.get(
-        "AUDIO_MINUTES",
-        "10"
-    )
-)
-
-SCREENSHOTS = int(
-    os.environ.get(
-        "SCREENSHOTS",
-        "6"
-    )
-)
-
-WAIT_SECONDS = int(
-    os.environ.get(
-        "WAIT_SECONDS",
-        "20"
-    )
-)
-
-DIRECTOR_NAME = os.environ.get(
-    "DIRECTOR_NAME",
-    ""
-).strip()
-
-CRF = {
-    480: 24,
-    720: 23,
-    1080: 22,
-    1440: 22,
-    2160: 21,
-}
-
-WORK = Path("work")
-
-SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/blogger",
-]
-
-
-# ============================================================
-# BASIC HELPERS
-# ============================================================
-
-def log(*args):
-    print(*args, flush=True)
-
-
-def retry(fn, tries=4, delay=5):
-    last_error = None
-
+def log(*a): print(*a,flush=True)
+def retry(fn,tries=4,delay=5):
+    last=None
     for i in range(tries):
-        try:
-            return fn()
-
+        try:return fn()
         except Exception as e:
-            last_error = e
+            last=e
+            if i==tries-1: raise
+            log(f"  retry {i+1}/{tries-1}: {e}");time.sleep(delay*(i+1))
+    raise last
 
-            if i == tries - 1:
-                raise
+def run(cmd):
+    log("  Running:"," ".join(map(str,cmd)))
+    p=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    if p.returncode:
+        raise RuntimeError(f"Command failed ({p.returncode}):\n{p.stdout[-12000:]}")
+    return p.stdout
 
-            wait = delay * (i + 1)
-
-            log(
-                f"  retry {i + 1}/{tries - 1} "
-                f"after error: {e}"
-            )
-
-            time.sleep(wait)
-
-    raise last_error
-
-
-def run(cmd, capture_output=False):
-    """
-    Run command.
-
-    When FFmpeg fails, print the last part of stderr so the
-    actual FFmpeg error is visible in GitHub Actions.
-    """
-
-    log(
-        "  Running:",
-        " ".join(str(x) for x in cmd)
-    )
-
-    result = subprocess.run(
-        cmd,
-        text=True,
-        stdout=subprocess.PIPE if capture_output else None,
-        stderr=subprocess.PIPE if capture_output else None,
-    )
-
-    if result.returncode != 0:
-        if capture_output:
-            stderr = result.stderr or ""
-            stdout = result.stdout or ""
-
-            if stderr:
-                log("----- COMMAND STDERR -----")
-                log(stderr[-12000:])
-
-            if stdout:
-                log("----- COMMAND STDOUT -----")
-                log(stdout[-4000:])
-
-        raise RuntimeError(
-            f"Command failed with exit code "
-            f"{result.returncode}: "
-            f"{' '.join(str(x) for x in cmd)}"
-        )
-
-    return result
-
-
-# ============================================================
-# GOOGLE CLIENTS
-# ============================================================
-
-creds = Credentials(
-    None,
-    refresh_token=REFRESH_TOKEN,
-    token_uri="https://oauth2.googleapis.com/token",
-    client_id=CLIENT_ID,
-    client_secret=CLIENT_SECRET,
-    scopes=SCOPES,
-)
-
+creds=Credentials(None,refresh_token=REFRESH_TOKEN,token_uri="https://oauth2.googleapis.com/token",client_id=CLIENT_ID,client_secret=CLIENT_SECRET,scopes=SCOPES)
 creds.refresh(Request())
+drive=build("drive","v3",credentials=creds,cache_discovery=False)
+blogger=build("blogger","v3",credentials=creds,cache_discovery=False)
+gclient=genai.Client(api_key=GEMINI_KEY)
 
-drive = build(
-    "drive",
-    "v3",
-    credentials=creds,
-    cache_discovery=False
-)
-
-blogger = build(
-    "blogger",
-    "v3",
-    credentials=creds,
-    cache_discovery=False
-)
-
-gclient = genai.Client(
-    api_key=GEMINI_KEY
-)
-
-
-# ============================================================
-# GOOGLE DRIVE
-# ============================================================
-
+# ---------------- Drive: source only ----------------
 def ensure_folder(name):
-
-    q = (
-        f"'{INPUT_FOLDER}' in parents "
-        f"and name='{name}' "
-        "and mimeType='application/vnd.google-apps.folder' "
-        "and trashed=false"
-    )
-
-    res = drive.files().list(
-        q=q,
-        fields="files(id,name)"
-    ).execute()
-
-    if res.get("files"):
-        return res["files"][0]["id"]
-
-    body = {
-        "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [INPUT_FOLDER],
-    }
-
-    return drive.files().create(
-        body=body,
-        fields="id"
-    ).execute()["id"]
-
+    q=f"'{INPUT_FOLDER}' in parents and name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    r=drive.files().list(q=q,fields="files(id,name)").execute()
+    if r.get("files"): return r["files"][0]["id"]
+    return drive.files().create(body={"name":name,"mimeType":"application/vnd.google-apps.folder","parents":[INPUT_FOLDER]},fields="id").execute()["id"]
 
 def list_videos():
+    q=f"'{INPUT_FOLDER}' in parents and mimeType contains 'video/' and trashed=false"
+    return drive.files().list(q=q,fields="files(id,name,size)",orderBy="createdTime").execute().get("files",[])
 
-    q = (
-        f"'{INPUT_FOLDER}' in parents "
-        "and mimeType contains 'video/' "
-        "and trashed=false"
-    )
-
-    res = drive.files().list(
-        q=q,
-        fields="files(id,name,size)",
-        orderBy="createdTime"
-    ).execute()
-
-    return res.get("files", [])
-
-
-def download(file_id, dest):
-
-    log("  Downloading to:", dest)
-
-    req = drive.files().get_media(
-        fileId=file_id
-    )
-
-    with open(dest, "wb") as fh:
-
-        dl = MediaIoBaseDownload(
-            fh,
-            req,
-            chunksize=64 * 1024 * 1024
-        )
-
-        done = False
-
+def download(file_id,dest):
+    req=drive.files().get_media(fileId=file_id)
+    with open(dest,"wb") as f:
+        dl=MediaIoBaseDownload(f,req,chunksize=64*1024*1024);done=False
         while not done:
+            st,done=retry(dl.next_chunk)
+            if st: log(f"  download {int(st.progress()*100)}%")
 
-            status, done = retry(
-                dl.next_chunk
-            )
+def move_source(video_id,processed_folder):
+    drive.files().update(fileId=video_id,addParents=processed_folder,removeParents=INPUT_FOLDER,fields="id,parents").execute()
 
-            if status:
-                log(
-                    f"  download "
-                    f"{int(status.progress() * 100)}%"
-                )
+# ---------------- Streamtape ----------------
+ST_BASE="https://api.streamtape.com"
 
-
-def upload_public(path, parent, mime):
-
-    log(
-        "  Uploading to Google Drive:",
-        os.path.basename(path)
-    )
-
-    media = MediaFileUpload(
-        path,
-        mimetype=mime,
-        resumable=True,
-        chunksize=64 * 1024 * 1024
-    )
-
-    req = drive.files().create(
-        body={
-            "name": os.path.basename(path),
-            "parents": [parent],
-        },
-        media_body=media,
-        fields="id"
-    )
-
-    resp = None
-
-    while resp is None:
-
-        _, resp = retry(
-            req.next_chunk
-        )
-
-    fid = resp["id"]
-
-    retry(
-        lambda: drive.permissions().create(
-            fileId=fid,
-            body={
-                "type": "anyone",
-                "role": "reader"
-            }
-        ).execute()
-    )
-
-    return fid
-
-
-# ============================================================
-# VCDN
-# ============================================================
-
-VCDN_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 "
-    "(KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-
-def _vcdn_auth_headers(content_type=None):
-
-    headers = {
-        "Authorization": f"Bearer {VCDN_API_KEY}",
-        "X-API-Key": VCDN_API_KEY,
-        "Accept": "application/json",
-        "User-Agent": VCDN_USER_AGENT,
-    }
-
-    if content_type:
-        headers["Content-Type"] = content_type
-
-    return headers
-
-
-def _vcdn_json(
-    method,
-    path,
-    payload=None
-):
-
-    body = None
-
-    headers = _vcdn_auth_headers()
-
-    if payload is not None:
-
-        body = json.dumps(
-            payload
-        ).encode("utf-8")
-
-        headers["Content-Type"] = (
-            "application/json"
-        )
-
-    def request():
-
-        req = urllib.request.Request(
-            f"https://{VCDN_API_HOST}{path}",
-            data=body,
-            headers=headers,
-            method=method,
-        )
-
+def st_api(path,params=None,method="GET",data=None,timeout=120):
+    params=dict(params or {});params.update({"login":STREAMTAPE_LOGIN,"key":STREAMTAPE_KEY})
+    url=ST_BASE+path+"?"+urllib.parse.urlencode(params)
+    def reqfn():
+        req=urllib.request.Request(url,data=data,method=method,headers={"User-Agent":"MovieBot/1.0","Accept":"application/json"})
         try:
-
-            with urllib.request.urlopen(
-                req,
-                timeout=120
-            ) as resp:
-
-                raw = resp.read().decode(
-                    "utf-8",
-                    "replace"
-                )
-
-                return (
-                    json.loads(raw)
-                    if raw
-                    else {}
-                )
-
+            with urllib.request.urlopen(req,timeout=timeout) as r:
+                raw=r.read().decode("utf-8","replace"); obj=json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
-
-            detail = e.read().decode(
-                "utf-8",
-                "replace"
-            )
-
-            raise RuntimeError(
-                f"VCDN {method} {path} "
-                f"failed: HTTP {e.code}: "
-                f"{detail}"
-            ) from e
-
-        except urllib.error.URLError as e:
-
-            raise RuntimeError(
-                f"VCDN connection failed "
-                f"for {method} {path}: {e}"
-            ) from e
-
-    return retry(
-        request,
-        tries=4
-    )
-
-
-def _vcdn_upload_binary(
-    upload_id,
-    path,
-    upload_url=None
-):
-
-    file_size = os.path.getsize(path)
-
-    target = (
-        upload_url
-        or
-        f"https://{VCDN_API_HOST}"
-        f"/api/v1/upload/{upload_id}/chunk"
-    )
-
-    if target.startswith("https://"):
-
-        from urllib.parse import urlsplit
-
-        parsed = urlsplit(target)
-
-        target_host = parsed.netloc
-        target_path = (
-            parsed.path
-            or "/"
-        )
-
-        if parsed.query:
-            target_path += (
-                "?"
-                + parsed.query
-            )
-
-    else:
-
-        target_host = VCDN_API_HOST
-
-        target_path = (
-            target
-            if target.startswith("/")
-            else "/" + target
-        )
-
-    def upload():
-
-        conn = http.client.HTTPSConnection(
-            target_host,
-            timeout=1800
-        )
-
-        try:
-
-            conn.putrequest(
-                "POST",
-                target_path
-            )
-
-            headers = _vcdn_auth_headers(
-                "application/octet-stream"
-            )
-
-            headers["Content-Length"] = (
-                str(file_size)
-            )
-
-            for key, value in headers.items():
-                conn.putheader(
-                    key,
-                    value
-                )
-
-            conn.endheaders()
-
-            sent = 0
-            last_log = -1
-
-            with open(path, "rb") as fh:
-
-                while True:
-
-                    chunk = fh.read(
-                        16 * 1024 * 1024
-                    )
-
-                    if not chunk:
-                        break
-
-                    conn.send(chunk)
-
-                    sent += len(chunk)
-
-                    pct = (
-                        int(
-                            sent * 100
-                            / file_size
-                        )
-                        if file_size
-                        else 100
-                    )
-
-                    if (
-                        pct >= last_log + 10
-                        or pct == 100
-                    ):
-                        log(
-                            f"  VCDN upload "
-                            f"{pct}%"
-                        )
-                        last_log = pct
-
-            resp = conn.getresponse()
-
-            raw = resp.read().decode(
-                "utf-8",
-                "replace"
-            )
-
-            if not (
-                200 <= resp.status < 300
-            ):
-                raise RuntimeError(
-                    "VCDN binary upload "
-                    f"failed: HTTP "
-                    f"{resp.status}: {raw}"
-                )
-
-            try:
-                return (
-                    json.loads(raw)
-                    if raw
-                    else {}
-                )
-
-            except json.JSONDecodeError:
-                return {
-                    "raw": raw
-                }
-
-        finally:
-            conn.close()
-
-    return retry(
-        upload,
-        tries=3
-    )
-
-
-def _multipart_header(
-    boundary,
-    title,
-    filename
-):
-
-    safe_name = (
-        os.path.basename(filename)
-        .replace('"', "'")
-    )
-
-    safe_title = (
-        str(title)
-        .replace('"', "'")
-    )
-
-    prefix = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: '
-        f'form-data; name="title"\r\n\r\n'
-        f"{safe_title}\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: '
-        f'form-data; name="file"; '
-        f'filename="{safe_name}"\r\n'
-        f"Content-Type: video/mp4\r\n\r\n"
-    ).encode("utf-8")
-
-    suffix = (
-        f"\r\n--{boundary}--\r\n"
-    ).encode("utf-8")
-
-    return prefix, suffix
-
-
-def _vcdn_direct_upload(
-    path,
-    title
-):
-
-    host = "api.vcdn.me"
-
-    boundary = (
-        "----MovieBotVCDNBoundary"
-        "7MA4YWxkTrZu0gW"
-    )
-
-    file_size = os.path.getsize(path)
-
-    prefix, suffix = _multipart_header(
-        boundary,
-        title,
-        path
-    )
-
-    total_length = (
-        len(prefix)
-        + file_size
-        + len(suffix)
-    )
-
-    def upload():
-
-        conn = http.client.HTTPSConnection(
-            host,
-            timeout=1800
-        )
-
-        try:
-
-            conn.putrequest(
-                "POST",
-                "/videos"
-            )
-
-            headers = _vcdn_auth_headers(
-                "multipart/form-data; "
-                f"boundary={boundary}"
-            )
-
-            headers["Content-Length"] = (
-                str(total_length)
-            )
-
-            for key, value in headers.items():
-
-                conn.putheader(
-                    key,
-                    value
-                )
-
-            conn.endheaders()
-
-            conn.send(prefix)
-
-            sent = 0
-            last_log = -1
-
-            with open(path, "rb") as fh:
-
-                while True:
-
-                    chunk = fh.read(
-                        16 * 1024 * 1024
-                    )
-
-                    if not chunk:
-                        break
-
-                    conn.send(chunk)
-
-                    sent += len(chunk)
-
-                    pct = (
-                        int(
-                            sent * 100
-                            / file_size
-                        )
-                        if file_size
-                        else 100
-                    )
-
-                    if (
-                        pct >= last_log + 10
-                        or pct == 100
-                    ):
-
-                        log(
-                            f"  VCDN direct "
-                            f"upload {pct}%"
-                        )
-
-                        last_log = pct
-
-            conn.send(suffix)
-
-            resp = conn.getresponse()
-
-            raw = resp.read().decode(
-                "utf-8",
-                "replace"
-            )
-
-            if not (
-                200 <= resp.status < 300
-            ):
-
-                raise RuntimeError(
-                    "VCDN direct upload "
-                    f"failed: HTTP "
-                    f"{resp.status}: {raw}"
-                )
-
-            try:
-
-                data = (
-                    json.loads(raw)
-                    if raw
-                    else {}
-                )
-
-            except json.JSONDecodeError:
-
-                raise RuntimeError(
-                    "VCDN direct upload "
-                    "returned non-JSON response: "
-                    f"{raw[:1000]}"
-                )
-
-            video_id = (
-                data.get("id")
-                or data.get("video_id")
-            )
-
-            embed_url = (
-                data.get("embed_url")
-                or data.get("embedUrl")
-            )
-
-            playback_url = (
-                data.get("playback_url")
-                or data.get("playbackUrl")
-            )
-
-            if (
-                not embed_url
-                and video_id
-            ):
-
-                embed_url = (
-                    "https://embed.vcdn.me/"
-                    f"{video_id}"
-                )
-
-            if (
-                not video_id
-                and not embed_url
-            ):
-
-                raise RuntimeError(
-                    "VCDN direct upload "
-                    "returned no video id/"
-                    f"embed_url: {data}"
-                )
-
-            return {
-                "id": video_id,
-                "embed_url": embed_url,
-                "playback_url": playback_url,
-                "status": data.get("status"),
-            }
-
-        finally:
-
-            conn.close()
-
-    return retry(
-        upload,
-        tries=3
-    )
-
-
-def vcdn_upload(
-    path,
-    title
-):
-
-    log(
-        f"Uploading "
-        f"{os.path.basename(path)} "
-        "to VCDN..."
-    )
-
-    file_size = os.path.getsize(path)
-
-    if file_size <= 0:
-
-        raise RuntimeError(
-            f"VCDN upload file is empty: "
-            f"{path}"
-        )
-
+            raise RuntimeError(f"Streamtape HTTP {e.code}: {e.read().decode('utf-8','replace')[:2000]}")
+        if obj.get("status")!=200: raise RuntimeError(f"Streamtape API error: {obj}")
+        return obj.get("result")
+    return retry(reqfn,tries=4,delay=3)
+
+def st_list(folder=None):
+    return st_api("/file/listfolder",{"folder":folder} if folder else {}).get("files",[])
+
+def st_find(name,size=None,folder=None):
     try:
+        files=st_list(folder)
+        exact=[f for f in files if f.get("name")==name]
+        if size is not None:
+            exact=[f for f in exact if int(f.get("size",-1) or -1)==int(size)] or exact
+        return exact[-1] if exact else None
+    except Exception as e:
+        log("  Streamtape list warning:",e);return None
 
-        log(
-            f"  VCDN file size: "
-            f"{file_size} bytes"
-        )
+def st_upload(path):
+    name=os.path.basename(path);size=os.path.getsize(path)
+    existing=st_find(name,size,STREAMTAPE_FOLDER or None)
+    if existing and existing.get("link"):
+        log("  Streamtape existing file reused:",existing["link"]);return existing
+    sha=hashlib.sha256()
+    with open(path,"rb") as f:
+        for b in iter(lambda:f.read(8*1024*1024),b""): sha.update(b)
+    params={"sha256":sha.hexdigest()}
+    if STREAMTAPE_FOLDER: params["folder"]=STREAMTAPE_FOLDER
+    up=st_api("/file/ul",params)
+    url=up.get("url")
+    if not url: raise RuntimeError(f"Streamtape upload URL missing: {up}")
+    p=urllib.parse.urlsplit(url);conn=http.client.HTTPSConnection(p.netloc,timeout=1800)
+    boundary="----MovieBotBoundary7MA4YWxk"
+    prefix=(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file1\"; filename=\"{name.replace(chr(34),chr(39))}\"\r\nContent-Type: video/mp4\r\n\r\n").encode()
+    suffix=f"\r\n--{boundary}--\r\n".encode()
+    try:
+        conn.putrequest("POST",p.path or "/")
+        conn.putheader("Content-Type",f"multipart/form-data; boundary={boundary}")
+        conn.putheader("Content-Length",str(len(prefix)+size+len(suffix)))
+        conn.putheader("User-Agent","MovieBot/1.0");conn.endheaders();conn.send(prefix)
+        sent=0;last=-1
+        with open(path,"rb") as f:
+            while True:
+                b=f.read(16*1024*1024)
+                if not b:break
+                conn.send(b);sent+=len(b);pct=int(sent*100/size) if size else 100
+                if pct>=last+10 or pct==100:log(f"  Streamtape upload {pct}%");last=pct
+        conn.send(suffix);resp=conn.getresponse();raw=resp.read().decode("utf-8","replace")
+        if not 200<=resp.status<300: raise RuntimeError(f"Streamtape upload HTTP {resp.status}: {raw[:2000]}")
+        result=json.loads(raw).get("result",{}) if raw else {}
+    finally: conn.close()
+    fid=result.get("id") or result.get("fileid") or result.get("file_id") or result.get("linkid")
+    link=result.get("link")
+    deadline=time.time()+8*60;found=None
+    while time.time()<deadline:
+        if fid:
+            try:
+                info=st_api("/file/info",{"file":fid})
+                if isinstance(info,dict):
+                    for k,v in info.items():
+                        if isinstance(v,dict):
+                            found=v;break
+            except Exception: pass
+        if not found: found=st_find(name,size,STREAMTAPE_FOLDER or None)
+        if found:
+            conv=found.get("converted") is True or str(found.get("convert","")).lower() in ("converted","complete","ready")
+            if conv or found.get("link"):
+                break
+        time.sleep(5)
+    if not found:
+        raise RuntimeError(f"Streamtape upload succeeded but file was not found: {name}")
+    link=found.get("link") or link
+    linkid=found.get("linkid") or found.get("id") or fid
+    if not link and linkid:
+        link="https://streamtape.com/v/"+str(linkid)+"/"+urllib.parse.quote(name)
+    if not link: raise RuntimeError(f"Streamtape stable link missing: {found}")
+    found.update({"link":link,"id":found.get("id") or fid,"linkid":linkid})
+    log("  Streamtape ready:",link);return found
 
-        return _vcdn_direct_upload(
-            path,
-            title
-        )
+def st_splash(file_id):
+    try:return str(st_api("/file/getsplash",{"file":file_id}))
+    except Exception as e:log("  Streamtape splash warning:",e);return ""
 
-    except Exception as direct_error:
+# ---------------- VCDN ----------------
+VCDN_HOST="cdn.vcdn.me"
 
-        log(
-            "  VCDN direct REST "
-            f"upload failed: {direct_error}"
-        )
+def vheaders(ct=None):
+    h={"Authorization":f"Bearer {VCDN_API_KEY}","X-API-Key":VCDN_API_KEY,"Accept":"application/json","User-Agent":"MovieBot/1.0"}
+    if ct:h["Content-Type"]=ct
+    return h
 
+def vjson(method,path,payload=None):
+    body=json.dumps(payload).encode() if payload is not None else None;h=vheaders("application/json" if payload is not None else None)
+    def f():
+        req=urllib.request.Request("https://"+VCDN_HOST+path,data=body,headers=h,method=method)
         try:
+            with urllib.request.urlopen(req,timeout=120) as r:return json.loads(r.read().decode("utf-8","replace") or "{}")
+        except urllib.error.HTTPError as e:raise RuntimeError(f"VCDN {method} {path}: HTTP {e.code}: {e.read().decode('utf-8','replace')[:2000]}")
+    return retry(f,tries=4,delay=3)
 
-            init = _vcdn_json(
-                "POST",
-                "/api/v1/upload/init",
-                {
-                    "filename": os.path.basename(path),
-                    "title": title,
-                    "size": file_size,
-                }
-            )
+def vcdn_upload(path,title):
+    size=os.path.getsize(path);log(f"Uploading {os.path.basename(path)} to VCDN ({size} bytes)...")
+    # Direct endpoint first; 413 falls back to documented chunk API.
+    try:
+        boundary="----MovieBotVCDN7MA4YWxk";prefix=(f"--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\n{title}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{os.path.basename(path)}\"\r\nContent-Type: video/mp4\r\n\r\n").encode();suffix=f"\r\n--{boundary}--\r\n".encode();pfx=len(prefix)+size+len(suffix)
+        c=http.client.HTTPSConnection("api.vcdn.me",timeout=1800);c.putrequest("POST","/videos");h=vheaders(f"multipart/form-data; boundary={boundary}");h["Content-Length"]=str(pfx)
+        for k,v in h.items():c.putheader(k,v)
+        c.endheaders();c.send(prefix);sent=0;last=-1
+        with open(path,"rb") as f:
+            while True:
+                b=f.read(16*1024*1024)
+                if not b:break
+                c.send(b);sent+=len(b);pct=int(sent*100/size)
+                if pct>=last+10 or pct==100:log(f"  VCDN upload {pct}%");last=pct
+        c.send(suffix);r=c.getresponse();raw=r.read().decode("utf-8","replace");c.close()
+        if not 200<=r.status<300:raise RuntimeError(f"VCDN direct HTTP {r.status}: {raw[:2000]}")
+        d=json.loads(raw);vid=d.get("id") or d.get("video_id");emb=d.get("embed_url") or d.get("embedUrl")
+        if vid and not emb:emb=f"https://embed.vcdn.me/embed/{vid}"
+        if not vid:raise RuntimeError(f"VCDN direct response has no id: {d}")
+        return {"id":vid,"embed_url":emb,"playback_url":d.get("playback_url") or d.get("playbackUrl"),"status":d.get("status")}
+    except Exception as direct:
+        log("  VCDN direct upload failed; trying chunked:",direct)
+    init=vjson("POST","/api/v1/upload/init",{"filename":os.path.basename(path),"title":title,"size":size})
+    uid=init.get("upload_id") or init.get("uploadId");url=init.get("upload_url") or init.get("uploadUrl")
+    if not uid:raise RuntimeError(f"VCDN init missing upload id: {init}")
+    target=url or f"https://{VCDN_HOST}/api/v1/upload/{uid}/chunk";p=urllib.parse.urlsplit(target);c=http.client.HTTPSConnection(p.netloc,timeout=1800);c.putrequest("POST",p.path or "/");h=vheaders("application/octet-stream");h["Content-Length"]=str(size)
+    for k,v in h.items():c.putheader(k,v)
+    c.endheaders();sent=0;last=-1
+    with open(path,"rb") as f:
+        while True:
+            b=f.read(16*1024*1024)
+            if not b:break
+            c.send(b);sent+=len(b);pct=int(sent*100/size)
+            if pct>=last+10 or pct==100:log(f"  VCDN chunk upload {pct}%");last=pct
+    r=c.getresponse();raw=r.read().decode("utf-8","replace");c.close()
+    if not 200<=r.status<300:raise RuntimeError(f"VCDN chunk HTTP {r.status}: {raw[:2000]}")
+    complete=vjson("POST","/api/v1/upload/complete",{"uploadId":uid});vid=complete.get("id") or complete.get("video_id") or complete.get("videoId")
+    if not vid:raise RuntimeError(f"VCDN complete missing id: {complete}")
+    emb=complete.get("embed_url") or complete.get("embedUrl");play=complete.get("playback_url") or complete.get("playbackUrl");status=complete.get("status")
+    deadline=time.time()+600
+    while time.time()<deadline and (not emb or status not in ("ready","processed","complete","completed")):
+        if status in ("failed","error"):raise RuntimeError(f"VCDN processing failed: {complete}")
+        time.sleep(5);info=vjson("GET",f"/api/v1/videos/{urllib.parse.quote(str(vid),safe='')}");status=info.get("status") or status;emb=info.get("embed_url") or info.get("embedUrl") or emb;play=info.get("playback_url") or info.get("playbackUrl") or play;log("  VCDN status:",status)
+    if not emb:emb=f"https://embed.vcdn.me/embed/{vid}"
+    return {"id":vid,"embed_url":emb,"playback_url":play,"status":status}
 
-            upload_id = (
-                init.get("upload_id")
-                or init.get("uploadId")
-            )
-
-            upload_url = (
-                init.get("upload_url")
-                or init.get("uploadUrl")
-            )
-
-            if not upload_id:
-
-                raise RuntimeError(
-                    "VCDN init did not return "
-                    f"upload_id/uploadId: {init}"
-                )
-
-            log(
-                f"  VCDN chunk upload id: "
-                f"{upload_id}"
-            )
-
-            _vcdn_upload_binary(
-                upload_id,
-                path,
-                upload_url
-            )
-
-            complete = _vcdn_json(
-                "POST",
-                "/api/v1/upload/complete",
-                {
-                    "uploadId": upload_id
-                }
-            )
-
-            video_id = (
-                complete.get("id")
-                or complete.get("video_id")
-                or complete.get("videoId")
-            )
-
-            embed_url = (
-                complete.get("embed_url")
-                or complete.get("embedUrl")
-            )
-
-            playback_url = (
-                complete.get("playback_url")
-                or complete.get("playbackUrl")
-            )
-
-            status = complete.get(
-                "status"
-            )
-
-            if not video_id:
-
-                raise RuntimeError(
-                    "VCDN complete returned "
-                    f"no video id: {complete}"
-                )
-
-            last_video = complete
-
-            if (
-                status
-                not in (
-                    "ready",
-                    "processed"
-                )
-                or not embed_url
-            ):
-
-                deadline = (
-                    time.time()
-                    + 10 * 60
-                )
-
-                while time.time() < deadline:
-
-                    time.sleep(5)
-
-                    try:
-
-                        info = _vcdn_json(
-                            "GET",
-                            "/api/v1/videos/"
-                            + urllib.parse.quote(
-                                str(video_id),
-                                safe=""
-                            )
-                        )
-
-                    except Exception as poll_error:
-
-                        log(
-                            "  VCDN status "
-                            f"check failed: "
-                            f"{poll_error}"
-                        )
-
-                        continue
-
-                    last_video = (
-                        info
-                        or last_video
-                    )
-
-                    status = (
-                        info.get("status")
-                        or status
-                    )
-
-                    embed_url = (
-                        info.get("embed_url")
-                        or info.get("embedUrl")
-                        or embed_url
-                    )
-
-                    playback_url = (
-                        info.get("playback_url")
-                        or info.get("playbackUrl")
-                        or playback_url
-                    )
-
-                    log(
-                        "  VCDN processing "
-                        f"status: {status}"
-                    )
-
-                    if status in (
-                        "ready",
-                        "processed",
-                        "complete",
-                        "completed"
-                    ):
-                        break
-
-                    if status in (
-                        "failed",
-                        "error"
-                    ):
-
-                        raise RuntimeError(
-                            "VCDN processing "
-                            f"failed for "
-                            f"{video_id}: {info}"
-                        )
-
-            if not embed_url:
-
-                embed_url = (
-                    "https://embed.vcdn.me/"
-                    f"{video_id}"
-                )
-
-            return {
-                "id": video_id,
-                "embed_url": embed_url,
-                "playback_url": playback_url,
-                "status": status,
-            }
-
-        except Exception as chunk_error:
-
-            raise RuntimeError(
-                "VCDN upload failed using "
-                "both upload methods.\n"
-                f"Direct REST error: "
-                f"{direct_error}\n"
-                f"Chunked API error: "
-                f"{chunk_error}"
-            ) from chunk_error
-
-
-# ============================================================
-# FFMPEG
-# ============================================================
-
-def parse_fps(*vals):
-
-    for v in vals:
-
-        try:
-
-            a, b = str(v).split("/")
-
-            a = float(a)
-            b = float(b)
-
-            if b and a / b > 0:
-                return a / b
-
-        except Exception:
-            pass
-
-    return 30.0
-
-
-def fmt_fps(x):
-
-    r = round(x)
-
-    if abs(x - r) < 0.05:
-        return str(r)
-
-    return f"{x:.2f}"
-
+# ---------------- FFmpeg ----------------
+def parse_fps(v):
+    try:
+        a,b=str(v).split("/");return float(a)/float(b) if float(b) else 30.0
+    except:return 30.0
 
 def probe(path):
-
-    out = subprocess.check_output([
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height,avg_frame_rate,r_frame_rate",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "json",
-        path,
-    ])
-
-    data = json.loads(out)
-
-    if not data.get("streams"):
-        raise RuntimeError(
-            f"No video stream found: {path}"
-        )
-
-    stream = data["streams"][0]
-
-    fps = parse_fps(
-        stream.get("avg_frame_rate"),
-        stream.get("r_frame_rate")
-    )
-
-    return (
-        float(data["format"]["duration"]),
-        int(stream["width"]),
-        int(stream["height"]),
-        fps,
-    )
-
-
-def validate_mp4(path):
-
-    if not os.path.exists(path):
-        raise RuntimeError(
-            f"FFmpeg output does not exist: "
-            f"{path}"
-        )
-
-    size = os.path.getsize(path)
-
-    if size <= 0:
-        raise RuntimeError(
-            f"FFmpeg created empty file: "
-            f"{path}"
-        )
-
-    try:
-
-        duration, width, height, fps = probe(
-            path
-        )
-
-    except Exception as e:
-
-        raise RuntimeError(
-            f"Invalid MP4 output "
-            f"{path}: {e}"
-        ) from e
-
-    log(
-        f"  Output validated: "
-        f"{width}x{height}, "
-        f"{fps:.2f}fps, "
-        f"{duration:.1f}s, "
-        f"{size} bytes"
-    )
-
-
-def make_even(n):
-
-    n = int(n)
-
-    if n % 2:
-        n -= 1
-
-    return max(2, n)
-
-
-def calculate_target_size(
-    target,
-    w,
-    h
-):
-    """
-    target = SHORT side.
-
-    Example:
-    1280x720 -> 852x480
-    1920x1080 -> 852x480
-    720x1280 -> 480x852
-
-    Both dimensions are forced to even numbers.
-    """
-
-    if w >= h:
-
-        target_h = make_even(target)
-
-        target_w = make_even(
-            round(
-                w
-                * target_h
-                / h
-            )
-        )
-
-    else:
-
-        target_w = make_even(target)
-
-        target_h = make_even(
-            round(
-                h
-                * target_w
-                / w
-            )
-        )
-
-    return target_w, target_h
-
-
-def transcode(
-    src,
-    target,
-    w,
-    h,
-    out
-):
-    """
-    Convert to target short-side resolution.
-
-    Critical fix:
-    H.264 requires even dimensions.
-    """
-
-    target_w, target_h = calculate_target_size(
-        target,
-        w,
-        h
-    )
-
-    crf = CRF.get(
-        target,
-        23
-    )
-
-    log(
-        f"  Target resolution: "
-        f"{target_w}x{target_h}"
-    )
-
-    vf = (
-        f"scale={target_w}:"
-        f"{target_h}:"
-        "flags=lanczos"
-    )
-
-    normal_command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-y",
-        "-i",
-        src,
-
-        "-map",
-        "0:v:0",
-
-        "-map",
-        "0:a:0?",
-
-        "-vf",
-        vf,
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "veryfast",
-
-        "-crf",
-        str(crf),
-
-        "-pix_fmt",
-        "yuv420p",
-
-        "-c:a",
-        "aac",
-
-        "-b:a",
-        "128k",
-
-        "-sn",
-        "-dn",
-
-        "-movflags",
-        "+faststart",
-
-        out,
-    ]
-
-    try:
-
-        run(
-            normal_command,
-            capture_output=True
-        )
-
-        validate_mp4(out)
-
-        return
-
-    except Exception as first_error:
-
-        log(
-            "  Normal FFmpeg encode "
-            f"failed: {first_error}"
-        )
-
-        if os.path.exists(out):
-            try:
-                os.remove(out)
-            except Exception:
-                pass
-
-    # Fallback encode
-    log(
-        "  Trying fallback "
-        "ultrafast encode..."
-    )
-
-    fallback_command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-y",
-        "-i",
-        src,
-
-        "-map",
-        "0:v:0",
-
-        "-map",
-        "0:a:0?",
-
-        "-vf",
-        vf,
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "ultrafast",
-
-        "-crf",
-        str(
-            min(
-                crf + 2,
-                30
-            )
-        ),
-
-        "-pix_fmt",
-        "yuv420p",
-
-        "-c:a",
-        "aac",
-
-        "-b:a",
-        "128k",
-
-        "-sn",
-        "-dn",
-
-        "-movflags",
-        "+faststart",
-
-        out,
-    ]
-
-    try:
-
-        run(
-            fallback_command,
-            capture_output=True
-        )
-
-        validate_mp4(out)
-
-    except Exception as fallback_error:
-
-        if os.path.exists(out):
-            try:
-                os.remove(out)
-            except Exception:
-                pass
-
-        raise RuntimeError(
-            "FFmpeg conversion failed.\n"
-            f"Normal encode: {first_error}\n"
-            f"Fallback encode: {fallback_error}"
-        ) from fallback_error
-
-
-def make_screenshots(
-    src,
-    dur,
-    outdir
-):
-
-    files = []
-
-    for i in range(
-        SCREENSHOTS
-    ):
-
-        t = (
-            dur
-            * (i + 1)
-            / (SCREENSHOTS + 1)
-        )
-
-        p = str(
-            outdir
-            / f"shot_{i + 1}.jpg"
-        )
-
-        run([
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{t:.2f}",
-            "-i",
-            src,
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=1280:-2",
-            "-q:v",
-            "3",
-            p,
-        ])
-
-        files.append(p)
-
-    return files
-
-
-def make_thumbnail(
-    src,
-    dur,
-    w,
-    h,
-    outdir
-):
-
-    """
-    9:16 portrait thumbnail.
-    """
-
-    if w * 16 >= h * 9:
-
-        ch = make_even(
-            h
-        )
-
-        cw = make_even(
-            int(h * 9 / 16)
-        )
-
-    else:
-
-        cw = make_even(
-            w
-        )
-
-        ch = make_even(
-            int(w * 16 / 9)
-        )
-
-    p = str(
-        outdir
-        / "thumb_9x16.jpg"
-    )
-
-    run([
-        "ffmpeg",
-        "-y",
-        "-loglevel",
-        "error",
-        "-ss",
-        f"{dur * 0.35:.2f}",
-        "-i",
-        src,
-        "-frames:v",
-        "1",
-        "-vf",
-        f"crop={cw}:{ch},scale=720:1280",
-        "-q:v",
-        "2",
-        p,
-    ])
-
-    return p
-
-
-def analysis_inputs(
-    src,
-    dur,
-    outdir
-):
-
-    frames = []
-
-    n = 12
-
-    for i in range(n):
-
-        t = (
-            dur
-            * (i + 1)
-            / (n + 1)
-        )
-
-        p = (
-            outdir
-            / f"an_{i}.jpg"
-        )
-
-        run([
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{t:.2f}",
-            "-i",
-            src,
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=512:-2",
-            "-q:v",
-            "5",
-            str(p),
-        ])
-
-        frames.append(
-            p.read_bytes()
-        )
-
-    audio = (
-        outdir
-        / "an_audio.mp3"
-    )
-
-    start = dur * 0.10
-
-    audio_duration = min(
-        AUDIO_MINUTES * 60,
-        max(
-            1,
-            dur - start
-        )
-    )
-
-    run([
-        "ffmpeg",
-        "-y",
-        "-loglevel",
-        "error",
-        "-ss",
-        f"{start:.2f}",
-        "-t",
-        str(audio_duration),
-        "-i",
-        src,
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-b:a",
-        "32k",
-        str(audio),
-    ])
-
-    return (
-        frames,
-        audio.read_bytes()
-    )
-
-
-# ============================================================
-# LABELS
-# ============================================================
-
-FALLBACK_LABELS = [
-    "Bollywood Content",
-    "Desi Junction",
-    "Dual Audio",
-    "Hindi Dubbed",
-    "Hindi TV Shows",
-    "Web Series",
-    "WWE",
-    "Hollywood Movies",
-    "Malayalam Movies",
-    "Marathi Movies",
-    "Mobile Movies",
-    "Multi Audio",
-    "Pakistani Movies",
-    "PC Games",
-    "Pre Release",
-    "Punjabi Movies",
-    "Single Video Songs",
-    "Tamil Movies",
-    "Telugu Movies",
-    "Trailers",
-    "Uncategorized",
-]
-
-BLOCKED_LABEL = re.compile(
-    r"18\+|adult|xxx|hevc|x265",
-    re.I
-)
-
-
-def parse_labels(page):
-
-    found = re.findall(
-        r"/search/label/"
-        r"([^\"'?&#<>\s/]+)",
-        page
-    )
-
-    labels = []
-    seen = set()
-
-    for f in found:
-
-        name = urllib.parse.unquote_plus(
-            f
-        ).strip()
-
-        if (
-            name
-            and name.lower()
-            not in seen
-        ):
-
-            seen.add(
-                name.lower()
-            )
-
-            labels.append(name)
-
-    return labels
-
-
-def get_site_labels():
-
-    labels = []
-
-    try:
-
-        url = blogger.blogs().get(
-            blogId=BLOG_ID
-        ).execute()["url"]
-
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent":
-                "Mozilla/5.0"
-            }
-        )
-
-        page = urllib.request.urlopen(
-            req,
-            timeout=30
-        ).read().decode(
-            "utf-8",
-            "ignore"
-        )
-
-        labels = parse_labels(
-            page
-        )
-
-        log(
-            f"  Found {len(labels)} "
-            "labels on the blog"
-        )
-
-    except Exception as e:
-
-        log(
-            "  Could not read "
-            f"blog labels: {e}"
-        )
-
-    if len(labels) < 3:
-
-        have = {
-            x.lower()
-            for x in labels
-        }
-
-        labels += [
-            x
-            for x in FALLBACK_LABELS
-            if x.lower() not in have
-        ]
-
-    labels = [
-        x
-        for x in labels
-        if not BLOCKED_LABEL.search(x)
-    ]
-
-    return labels[:60]
-
-
-def pick_labels(
-    raw,
-    site_labels
-):
-
-    canon = {
-        x.lower(): x
-        for x in site_labels
-    }
-
-    out = []
-
-    for r in raw or []:
-
-        c = canon.get(
-            str(r).strip().lower()
-        )
-
-        if c and c not in out:
-            out.append(c)
-
-    return out[:4]
-
-
-# ============================================================
-# GEMINI
-# ============================================================
-
-def as_paragraphs(v):
-
-    if isinstance(v, list):
-
-        return [
-            str(x).strip()
-            for x in v
-            if str(x).strip()
-        ]
-
-    return [
-        p.strip()
-        for p in re.split(
-            r"\n\s*\n",
-            str(v or "")
-        )
-        if p.strip()
-    ]
-
-
-YEAR_RE = re.compile(
-    r"(?<!\d)"
-    r"(19[5-9]\d|20[0-4]\d)"
-    r"(?!\d)"
-)
-
-
-def find_year(filename):
-
-    m = YEAR_RE.search(
-        Path(filename).stem
-    )
-
-    return (
-        int(m.group(1))
-        if m
-        else None
-    )
-
-
-def clean_hint(filename):
-
-    t = Path(filename).stem
-
-    t = re.sub(
-        r"[#@]\S+",
-        " ",
-        t
-    )
-
-    t = re.sub(
-        r"[_.\-]+",
-        " ",
-        t
-    )
-
-    t = re.sub(
-        r"[^\w\s]",
-        " ",
-        t,
-        flags=re.UNICODE
-    )
-
-    t = re.sub(
-        r"\s+",
-        " ",
-        t
-    ).strip()
-
-    no_year = re.sub(
-        r"\s+",
-        " ",
-        YEAR_RE.sub(
-            " ",
-            t
-        )
-    ).strip()
-
-    return (
-        no_year
-        or t
-    )
-
-
-def analyze(
-    filename_hint,
-    frames,
-    audio_bytes,
-    site_labels
-):
-
-    hint = clean_hint(
-        filename_hint
-    )
-
-    year = find_year(
-        filename_hint
-    )
-
-    prompt = f"""
-You are a film writer.
-
-You are publishing an ORIGINAL film on its own film blog.
-
-You receive:
-- 12 frames spread across the film
-- an audio sample
-- a messy filename hint
-
-Filename hint:
-"{hint}"
-
-Language hint:
-"{LANGUAGE_HINT}"
-
-Director name:
-"{DIRECTOR_NAME}"
-
-Rules:
-
-- Write everything in natural English.
-- Never copy text from websites, reviews, films or other sources.
-- Base your description only on what you can actually see and hear.
-- If uncertain, stay general.
-- Never invent cast, crew, awards, festivals, ratings, box office or
-  specific plot facts.
-- Do not use piracy-related wording.
-- Do not mention leaked, HD print, free download full movie, WEB-DL,
-  dual audio, 300mb, etc.
-- The title must be 1-6 words.
-- No hashtags.
-- No emojis.
-- No year in title.
-- Do not use words like trending reels.
-
-Return ONLY valid JSON.
-
-Keys:
-
-title:
-realistic film title, 1-6 words
-
-tagline:
-one sentence, maximum 20 words
-
-synopsis:
-2 short paragraphs, about 120 words total,
-spoiler-light, separated by a blank line
-
-review:
-3-4 paragraphs, about 300 words total,
-analysing tone, visual style, camera work,
-sound, music, performances in general terms,
-themes and who may enjoy the film
-
-themes:
-list of 3-5 short phrases
-
-faq:
-list of 4 objects:
-{{"q":"...","a":"..."}}
-
-genres:
-list of 1-3 genres
-
-language:
-main spoken language
-
-content_rating:
-one of:
-"General audience"
-"Teen and above"
-"Mature audience"
-
-tags:
-list of up to 6 short keywords
-
-labels:
-pick 1-4 categories ONLY from this exact list:
-
-{json.dumps(site_labels)}
-
-Judge labels by:
-- language
-- film industry/country
-- type
-- movie/web series/trailer/song
-
-Ignore encoding and file-format labels.
-"""
-
-    parts = [
-        types.Part.from_bytes(
-            data=b,
-            mime_type="image/jpeg"
-        )
-        for b in frames
-    ]
-
-    parts.append(
-        types.Part.from_bytes(
-            data=audio_bytes,
-            mime_type="audio/mp3"
-        )
-    )
-
-    data = {}
-
-    models = list(dict.fromkeys([
-        GEMINI_MODEL,
-        "gemini-flash-latest"
-    ]))
-
-    for model in models:
-
+    d=json.loads(subprocess.check_output(["ffprobe","-v","error","-select_streams","v:0","-show_entries","stream=width,height,avg_frame_rate,r_frame_rate","-show_entries","format=duration","-of","json",path]))
+    s=d["streams"][0];return float(d["format"]["duration"]),int(s["width"]),int(s["height"]),parse_fps(s.get("avg_frame_rate") or s.get("r_frame_rate"))
+
+def even(n):return max(2,int(n)//2*2)
+def target_size(target,w,h):
+    if w>=h:return even(round(w*even(target)/h)),even(target)
+    return even(target),even(round(h*even(target)/w))
+
+def transcode(src,target,w,h,out):
+    ow,oh=target_size(target,w,h);crf=CRF.get(target,23);vf=f"scale={ow}:{oh}:flags=lanczos"
+    for preset,crf2 in (("veryfast",crf),("ultrafast",min(30,crf+2))):
         try:
-
-            resp = retry(
-                lambda: (
-                    gclient
-                    .models
-                    .generate_content(
-                        model=model,
-                        contents=[
-                            prompt,
-                            *parts
-                        ],
-                        config=(
-                            types
-                            .GenerateContentConfig(
-                                response_mime_type=
-                                "application/json"
-                            )
-                        )
-                    )
-                ),
-                tries=2
-            )
-
-            raw = (
-                resp.text
-                .strip()
-            )
-
-            raw = re.sub(
-                r"^```json",
-                "",
-                raw,
-                flags=re.I
-            )
-
-            raw = re.sub(
-                r"```$",
-                "",
-                raw
-            ).strip()
-
-            data = json.loads(
-                raw
-            )
-
-            log(
-                "  Gemini model used:",
-                model
-            )
-
-            break
-
+            run(["ffmpeg","-hide_banner","-y","-i",src,"-map","0:v:0","-map","0:a:0?","-vf",vf,"-c:v","libx264","-preset",preset,"-crf",str(crf2),"-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-sn","-dn","-movflags","+faststart",out]);probe(out);log(f"  Created {ow}x{oh}: {out}");return
         except Exception as e:
+            log(f"  FFmpeg {preset} failed: {e}");
+            if os.path.exists(out):os.remove(out)
+    raise RuntimeError(f"FFmpeg conversion failed for {target}p")
 
-            log(
-                f"  Gemini model "
-                f"{model} failed: {e}"
-            )
+def analysis_inputs(src,dur,outdir):
+    frames=[]
+    for i in range(12):
+        t=dur*(i+1)/13;p=outdir/f"an_{i}.jpg";run(["ffmpeg","-y","-loglevel","error","-ss",f"{t:.2f}","-i",src,"-frames:v","1","-vf","scale=512:-2","-q:v","5",str(p)]);frames.append(p.read_bytes())
+    audio=outdir/"an_audio.mp3";start=dur*.1;run(["ffmpeg","-y","-loglevel","error","-ss",f"{start:.2f}","-t",str(min(AUDIO_MINUTES*60,max(1,dur-start))),"-i",src,"-vn","-ac","1","-ar","16000","-b:a","32k",str(audio)])
+    return frames,audio.read_bytes()
 
-    if not data:
-        log(
-            "  Using fallback text."
-        )
+# ---------------- Gemini ----------------
+FALLBACK_LABELS=["Bollywood Content","Desi Junction","Dual Audio","Hindi Dubbed","Hindi TV Shows","Web Series","WWE","Hollywood Movies","Malayalam Movies","Marathi Movies","Mobile Movies","Multi Audio","Pakistani Movies","PC Games","Pre Release","Punjabi Movies","Single Video Songs","Tamil Movies","Telugu Movies","Trailers","Uncategorized"]
+BLOCKED=re.compile(r"18\+|adult|xxx|hevc|x265",re.I);YEAR_RE=re.compile(r"(?<!\d)(19[5-9]\d|20[0-4]\d)(?!\d)")
+def clean_hint(n):
+    t=Path(n).stem;t=re.sub(r"[#@]\S+"," ",t);t=re.sub(r"[_.\-]+"," ",t);t=re.sub(r"[^\w\s]"," ",t);return re.sub(r"\s+"," ",t).strip()
+def site_labels():
+    try:
+        url=blogger.blogs().get(blogId=BLOG_ID).execute()["url"];req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"});page=urllib.request.urlopen(req,timeout=30).read().decode("utf-8","ignore");labs=[]
+        for x in re.findall(r"/search/label/([^\"'?&#<>\s/]+)",page):
+            x=urllib.parse.unquote_plus(x).strip()
+            if x and x.lower() not in {z.lower() for z in labs}:labs.append(x)
+    except Exception as e:log("  Label read warning:",e);labs=[]
+    for x in FALLBACK_LABELS:
+        if len(labs)<3 and x.lower() not in {z.lower() for z in labs}:labs.append(x)
+    return [x for x in labs if not BLOCKED.search(x)][:60]
+def analyze(name,frames,audio,labels):
+    hint=clean_hint(name);year=int(YEAR_RE.search(Path(name).stem).group(1)) if YEAR_RE.search(Path(name).stem) else None
+    prompt=f'''You are a film writer. Return ONLY valid JSON. Write natural English. Base everything only on the supplied frames/audio and filename hint. Never invent cast, awards, ratings, box office or specific plot facts. No piracy wording. Title 1-6 words, no year. Filename hint: {hint}. Language hint: {LANGUAGE_HINT}. Director: {DIRECTOR_NAME}. Exact available labels: {json.dumps(labels)}. Keys: title, tagline, synopsis (2 short paragraphs), review (3 short paragraphs), themes (3-5), faq (4 objects with q/a), genres (1-3), language, content_rating (General audience/Teen and above/Mature audience), tags (up to 6), labels (1-4 only from exact list).'''
+    parts=[types.Part.from_bytes(data=b,mime_type="image/jpeg") for b in frames]+[types.Part.from_bytes(data=audio,mime_type="audio/mp3")];data={}
+    for model in dict.fromkeys([GEMINI_MODEL,"gemini-flash-latest"]):
+        try:
+            r=retry(lambda:gclient.models.generate_content(model=model,contents=[prompt,*parts],config=types.GenerateContentConfig(response_mime_type="application/json")),tries=2,delay=4);data=json.loads(re.sub(r"^```json|```$","",r.text.strip(),flags=re.I).strip());log("  Gemini:",model);break
+        except Exception as e:log("  Gemini failed:",e)
+    syn=data.get("synopsis") or ["An original film."];syn=syn if isinstance(syn,list) else re.split(r"\n\s*\n",str(syn))
+    canon={x.lower():x for x in labels};chosen=[canon[x.strip().lower()] for x in data.get("labels",[]) if str(x).strip().lower() in canon][:4]
+    return {"title":str(data.get("title") or hint or "Untitled Film").strip(),"tagline":str(data.get("tagline") or "").strip(),"synopsis":[str(x).strip() for x in syn if str(x).strip()],"review":[str(x).strip() for x in (data.get("review") or [])],"themes":[str(x) for x in data.get("themes",[])][:5],"faq":[x for x in data.get("faq",[]) if isinstance(x,dict) and x.get("q") and x.get("a")][:4],"genres":[str(x) for x in data.get("genres",["Drama"])][:3],"language":str(data.get("language") or LANGUAGE_HINT or "Unknown"),"release_year":year,"content_rating":str(data.get("content_rating") or "General audience"),"tags":[str(x) for x in data.get("tags",[])][:6],"labels":chosen}
 
-    faq = [
-        f
-        for f in (
-            data.get("faq")
-            or []
-        )
-        if (
-            isinstance(f, dict)
-            and f.get("q")
-            and f.get("a")
-        )
-    ]
-
-    title = (
-        data.get("title")
-        or hint
-        or "Untitled Film"
-    )
-
-    return {
-        "title": str(title).strip(),
-
-        "tagline": str(
-            data.get("tagline")
-            or ""
-        ).strip(),
-
-        "synopsis": (
-            as_paragraphs(
-                data.get("synopsis")
-            )
-            or [
-                "An original film."
-            ]
-        ),
-
-        "review": as_paragraphs(
-            data.get("review")
-        ),
-
-        "themes": [
-            str(x)
-            for x in (
-                data.get("themes")
-                or []
-            )
-        ][:5],
-
-        "faq": faq[:4],
-
-        "genres": [
-            str(x)
-            for x in (
-                data.get("genres")
-                or ["Drama"]
-            )
-        ][:3],
-
-        "language": (
-            str(
-                data.get("language")
-                or LANGUAGE_HINT
-                or "Unknown"
-            )
-        ),
-
-        "release_year": year,
-
-        "content_rating": (
-            data.get(
-                "content_rating"
-            )
-            or "General audience"
-        ),
-
-        "tags": [
-            str(x)
-            for x in (
-                data.get("tags")
-                or []
-            )
-        ][:6],
-
-        "labels": pick_labels(
-            data.get("labels"),
-            site_labels
-        ),
-    }
-
-
-# ============================================================
-# POST HTML
-# ============================================================
-
+# ---------------- HTML ----------------
 def human(n):
-
-    n = float(n)
-
-    if n >= 1024 ** 3:
-
-        return (
-            f"{n / 1024 ** 3:.1f}GB"
-        )
-
-    return (
-        f"{n / 1024 ** 2:.0f}MB"
-    )
-
-
-def fmt_runtime(sec):
-
-    sec = int(sec)
-
-    if sec < 60:
-        return f"{sec} sec"
-
-    minutes = sec // 60
-
-    if minutes < 60:
-        return f"{minutes} min"
-
-    return (
-        f"{minutes // 60} h "
-        f"{minutes % 60} min"
-    )
-
-
-def img_url(fid):
-
-    return (
-        "https://lh3.googleusercontent.com/d/"
-        f"{fid}"
-    )
-
-
-TIMER_SCRIPT = """
-<script>
-(function () {
-  var WAIT = %d;
-
-  var btns =
-    document.querySelectorAll(
-      'a.mv-dl[data-fid]'
-    );
-
-  for (
-    var i = 0;
-    i < btns.length;
-    i++
-  ) {
-
-    (function (b) {
-
-      var label = b.innerHTML;
-      var busy = false;
-
-      b.addEventListener(
-        'click',
-        function (e) {
-
-          e.preventDefault();
-
-          if (busy) {
-            return;
-          }
-
-          busy = true;
-
-          var left = WAIT;
-
-          b.style.opacity = '0.85';
-
-          b.innerHTML =
-            'Please wait '
-            + left
-            + ' seconds...';
-
-          var t = setInterval(
-            function () {
-
-              left--;
-
-              if (left > 0) {
-
-                b.innerHTML =
-                  'Please wait '
-                  + left
-                  + ' seconds...';
-
-                return;
-              }
-
-              clearInterval(t);
-
-              b.innerHTML =
-                'Download starting...';
-
-              window.location.href =
-                'https://drive.usercontent.google.com/download?id='
-                + b.getAttribute('data-fid')
-                + '&export=download&confirm=t';
-
-              setTimeout(
-                function () {
-
-                  b.innerHTML = label;
-
-                  b.style.opacity = '1';
-
-                  busy = false;
-
-                },
-                6000
-              );
-
-            },
-            1000
-          );
-        }
-      );
-
-    })(btns[i]);
-  }
-
-})();
-</script>
-""" % WAIT_SECONDS
-
-
-def build_html(
-    meta,
-    thumb_id,
-    shot_ids,
-    outputs,
-    fps,
-    dur,
-    vcdn
-):
-
-    e = html.escape
-
-    title = e(
-        meta["title"]
-    )
-
-    year = meta[
-        "release_year"
-    ]
-
-    ytxt = (
-        f" ({year})"
-        if year
-        else ""
-    )
-
-    lang_known = (
-        meta["language"]
-        and meta["language"]
-        .lower()
-        != "unknown"
-    )
-
-    lang = e(
-        meta["language"]
-    )
-
-    lang_tag = (
-        f' <span style="color:#f2f200">'
-        f'{{{lang}}}</span>'
-        if lang_known
-        else ""
-    )
-
-    genres = ", ".join(
-        e(g)
-        for g in meta["genres"]
-    )
-
-    fps_txt = fmt_fps(
-        fps
-    )
-
-    qualities = " - ".join(
-        f"{h}p"
-        for h, _, _ in outputs
-    )
-
-    sizes = " - ".join(
-        human(s)
-        for _, _, s in outputs
-    )
-
-    syn = [
-        e(p)
-        for p in meta["synopsis"]
-    ]
-
-    review = [
-        e(p)
-        for p in meta["review"]
-    ]
-
-    btn = (
-        "display:block;"
-        "width:260px;"
-        "max-width:90%;"
-        "margin:0 auto 28px;"
-        "padding:18px 10px;"
-        "text-align:center;"
-        "color:#fff;"
-        "font-weight:800;"
-        "font-size:19px;"
-        "text-decoration:none;"
-        "cursor:pointer;"
-        "background:"
-        "linear-gradient("
-        "90deg,#57a51c,#1f4fb4"
-        ");"
-        "box-shadow:"
-        "0 8px 14px rgba(0,0,0,.45);"
-    )
-
-    head = (
-        "text-align:center;"
-        "color:#fff;"
-        "font-size:21px;"
-        "line-height:1.4;"
-        "margin:28px 0 18px;"
-        "font-weight:800"
-    )
-
-    hr = (
-        '<hr style="border:0;'
-        'border-top:1px solid '
-        'rgba(255,255,255,.6);'
-        'margin:22px 0"/>'
-    )
-
-    h3 = (
-        '<h3 style="text-align:center">'
-        '{}'
-        '</h3>'
-    )
-
-    info = [
-        f"<b>Movie Name:</b> {title}"
-    ]
-
-    if year:
-
-        info.append(
-            f"<b>Release Year:</b> "
-            f"{year}"
-        )
-
-    if DIRECTOR_NAME:
-
-        info.append(
-            f"<b>Directed by:</b> "
-            f"{e(DIRECTOR_NAME)}"
-        )
-
-    if lang_known:
-
-        info.append(
-            f"<b>Language:</b> {lang}"
-        )
-
-    info += [
-        f"<b>Runtime:</b> "
-        f"{fmt_runtime(dur)}",
-
-        f"<b>Genres:</b> "
-        f"{genres}",
-
-        f"<b>Content Advisory:</b> "
-        f"{e(meta['content_rating'])}",
-
-        f"<b>Quality:</b> "
-        f"{qualities}",
-
-        f"<b>Frame Rate:</b> "
-        f"{fps_txt}fps",
-
-        f"<b>Size:</b> "
-        f"{sizes}",
-    ]
-
-    parts = [
-
-        (
-            '<div style="text-align:center">'
-            f'<img src="{img_url(thumb_id)}" '
-            f'alt="{title}" '
-            'width="270" '
-            'style="max-width:60%;'
-            'height:auto;'
-            'border-radius:8px"/>'
-            '</div>'
-        ),
-
-        (
-            '<p style="text-align:center">'
-            f'<b>{title}{ytxt}</b>'
-            + (
-                f' - {lang} film'
-                if lang_known
-                else ""
-            )
-            + '</p>'
-        ),
-    ]
-
-    if meta["tagline"]:
-
-        parts.append(
-            '<p style="text-align:center">'
-            '<i>'
-            f'{e(meta["tagline"])}'
-            '</i>'
-            '</p>'
-        )
-
-    if syn:
-
-        parts.append(
-            f"<p>{syn[0]}</p>"
-        )
-
-    parts.append(
-        h3.format("Movie Info")
-    )
-
-    parts.append(
-        "<p>"
-        + "<br/>".join(info)
-        + "</p>"
-    )
-
-    parts.append(
-        h3.format(
-            "Movie Synopsis / Plot"
-        )
-    )
-
-    parts += [
-        f"<p>{p}</p>"
-        for p in syn
-    ]
-
-    # ---------------- WATCH ----------------
-
-    parts.append(
-        f"<h3>Watch {title} Online</h3>"
-    )
-
-    embed_url = vcdn[
-        "embed_url"
-    ]
-
-    parts.append(
-        '<div style="width:100%;'
-        'max-width:100%;'
-        'background:#000;'
-        'border-radius:8px;'
-        'overflow:hidden;'
-        'margin:0 auto 24px">'
-
-        f'<iframe '
-        f'src="{e(embed_url, quote=True)}" '
-        'width="100%" '
-        'height="420" '
-        'frameborder="0" '
-        'allow="autoplay; '
-        'encrypted-media; '
-        'picture-in-picture" '
-        'allowfullscreen="true" '
-        'style="border:0;'
-        'display:block">'
-        '</iframe>'
-
-        '</div>'
-    )
-
-    parts.append(
-        '<p style="text-align:center;'
-        'font-size:13px;'
-        'opacity:.8">'
-        'Adaptive streaming player '
-        'powered by VCDN.'
-        '</p>'
-    )
-
-    # ---------------- REVIEW ----------------
-
-    if review:
-
-        parts.append(
-            h3.format(
-                f"{title} - "
-                "Film Review and Analysis"
-            )
-        )
-
-        parts += [
-            f"<p>{p}</p>"
-            for p in review
-        ]
-
-    # ---------------- THEMES ----------------
-
-    if meta["themes"]:
-
-        parts.append(
-            h3.format("Themes")
-        )
-
-        parts.append(
-            "<ul>"
-            + "".join(
-                f"<li>{e(t)}</li>"
-                for t in meta["themes"]
-            )
-            + "</ul>"
-        )
-
-    # ---------------- SCREENSHOTS ----------------
-
-    parts.append(
-        h3.format("Screenshots")
-    )
-
-    for fid in shot_ids:
-
-        parts.append(
-            '<p style="text-align:center">'
-            f'<img src="{img_url(fid)}" '
-            f'alt="{title} screenshot" '
-            'style="max-width:100%;'
-            'height:auto"/>'
-            '</p>'
-        )
-
-    parts.append(hr)
-
-    # ---------------- DOWNLOAD ----------------
-
-    parts.append(
-        h3.format("Download Links")
-    )
-
-    for h, fid, size in outputs:
-
-        direct = (
-            "https://drive.usercontent.google.com/"
-            f"download?id={fid}"
-            "&amp;export=download"
-            "&amp;confirm=t"
-        )
-
-        parts.append(
-            f'<h4 style="{head}">'
-            f'{title}{ytxt}'
-            f'{lang_tag} '
-            f'{h}p x264 '
-            f'{fps_txt}fps '
-            f'[{human(size)}]'
-            '</h4>'
-        )
-
-        parts.append(
-            f'<a class="mv-dl" '
-            f'data-fid="{fid}" '
-            f'href="{direct}" '
-            'rel="noopener" '
-            f'style="{btn}">'
-            '&#11015;'
-            '&#9889;'
-            'DOWNLOAD NOW'
-            '&#9889;'
-            '&#11015;'
-            '</a>'
-        )
-
-    parts.append(hr)
-
-    # ---------------- FAQ ----------------
-
-    if meta["faq"]:
-
-        parts.append(
-            h3.format(
-                f"{title} - FAQ"
-            )
-        )
-
-        for f in meta["faq"]:
-
-            parts.append(
-                f"<h4>"
-                f"{e(str(f['q']))}"
-                f"</h4>"
-                f"<p>"
-                f"{e(str(f['a']))}"
-                f"</p>"
-            )
-
-    parts.append(
-        '<h3 style="text-align:center;'
-        'color:#f0a0ff">'
-        'Winding Up &#10084;&#65039;'
-        '</h3>'
-    )
-
-    parts.append(
-        TIMER_SCRIPT
-    )
-
-    return "\n".join(parts)
-
-
-# ============================================================
-# TARGET RESOLUTIONS
-# ============================================================
-
-def target_resolutions(
-    width,
-    height
-):
-
-    short_side = min(
-        width,
-        height
-    )
-
-    targets = sorted({
-        target
-        for target in RESOLUTIONS
-        if target <= short_side
-    })
-
-    if not targets:
-
-        # Never upscale.
-        # If source is below 480, use the original
-        # short side rounded down to an even number.
-        original = make_even(
-            short_side
-        )
-
-        targets = [
-            original
-        ]
-
-    return targets
-
-
-# ============================================================
-# PROCESS ONE MOVIE
-# ============================================================
-
-def process(
-    video,
-    processed_folder,
-    output_folder
-):
-
-    name = video["name"]
-
-    log(
-        f"\n=== Processing: {name} ==="
-    )
-
-    job = (
-        WORK
-        / video["id"]
-    )
-
-    job.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    src = str(
-        job
-        / "source.mp4"
-    )
-
-    slug = re.sub(
-        r"[^a-zA-Z0-9]+",
-        "-",
-        Path(name).stem
-    ).strip("-").lower()
-
-    if not slug:
-        slug = "movie"
-
-    # ---------------- DOWNLOAD ----------------
-
-    log(
-        "Downloading original..."
-    )
-
-    download(
-        video["id"],
-        src
-    )
-
-    # ---------------- PROBE ----------------
-
-    dur, w, h, fps = probe(
-        src
-    )
-
-    short = min(
-        w,
-        h
-    )
-
-    log(
-        f"Duration "
-        f"{dur / 60:.1f} min, "
-        f"{w}x{h}, "
-        f"{fps:.2f} fps"
-    )
-
-    # ---------------- IMAGES ----------------
-
-    log(
-        "Making screenshots "
-        "and thumbnail..."
-    )
-
-    shots = make_screenshots(
-        src,
-        dur,
-        job
-    )
-
-    thumb = make_thumbnail(
-        src,
-        dur,
-        w,
-        h,
-        job
-    )
-
-    # ---------------- GEMINI ----------------
-
-    log(
-        "Analysing with Gemini..."
-    )
-
-    site_labels = (
-        get_site_labels()
-    )
-
-    frames, audio = (
-        analysis_inputs(
-            src,
-            dur,
-            job
-        )
-    )
-
-    meta = analyze(
-        name,
-        frames,
-        audio,
-        site_labels
-    )
-
-    log(
-        "  Title:",
-        meta["title"]
-    )
-
-    log(
-        "  Labels:",
-        meta["labels"]
-    )
-
-    # ---------------- RESOLUTIONS ----------------
-
-    targets = target_resolutions(
-        w,
-        h
-    )
-
-    log(
-        "Generated resolutions:",
-        ", ".join(
-            f"{x}p"
-            for x in targets
-        )
-    )
-
-    outputs = []
-
-    vcdn = None
-
-    # Highest generated resolution
-    # goes to VCDN.
-    vcdn_target = max(
-        targets
-    )
-
-    # ---------------- TRANSCODE ----------------
-
+    n=float(n);return f"{n/1024**3:.1f}GB" if n>=1024**3 else f"{n/1024**2:.0f}MB"
+def runtime(s):
+    s=int(s);return f"{s//3600} h {(s%3600)//60} min" if s>=3600 else f"{s//60} min" if s>=60 else f"{s} sec"
+def fps_text(x):return str(round(x)) if abs(x-round(x))<.05 else f"{x:.2f}"
+TIMER='''<script>(function(){var WAIT=%d;document.querySelectorAll('a.mv-dl[data-url]').forEach(function(b){var label=b.innerHTML,busy=false;b.addEventListener('click',function(e){e.preventDefault();if(busy)return;busy=true;var left=WAIT;b.innerHTML='Please wait '+left+' seconds...';var t=setInterval(function(){left--;if(left>0){b.innerHTML='Please wait '+left+' seconds...';return}clearInterval(t);b.innerHTML='Opening download...';window.location.href=b.getAttribute('data-url');setTimeout(function(){b.innerHTML=label;busy=false},6000)},1000)})})})();</script>'''%WAIT_SECONDS
+
+def build_html(meta,thumb_url,downloads,vcdn,dur,fps):
+    e=html.escape;title=e(meta["title"]);lang=e(meta["language"]);genres=e(", ".join(meta["genres"]));qualities=" - ".join(f"{x['target']}p" for x in downloads);sizes=" - ".join(human(x["size"]) for x in downloads)
+    parts=[]
+    if thumb_url:parts.append(f'<div style="text-align:center"><img src="{e(thumb_url,quote=True)}" alt="{title}" width="270" style="max-width:70%;height:auto;border-radius:8px"/></div>')
+    parts.append(f'<p style="text-align:center"><b>{title}</b></p>')
+    if meta["tagline"]:parts.append(f'<p style="text-align:center"><i>{e(meta["tagline"])}</i></p>')
+    parts.append('<h3 style="text-align:center">Movie Info</h3><p>'+"<br/>".join([f"<b>Movie Name:</b> {title}",f"<b>Runtime:</b> {runtime(dur)}",f"<b>Genres:</b> {genres}",f"<b>Language:</b> {lang}",f"<b>Quality:</b> {qualities}",f"<b>Frame Rate:</b> {fps_text(fps)}fps",f"<b>Size:</b> {sizes}",f"<b>Content Advisory:</b> {e(meta['content_rating'])}"])+"</p>")
+    parts.append('<h3 style="text-align:center">Movie Synopsis / Plot</h3>'+"".join(f"<p>{e(p)}</p>" for p in meta["synopsis"]))
+    emb=vcdn["embed_url"];parts.append(f'<h3 style="text-align:center">Watch {title} Online</h3><div style="width:100%;background:#000;border-radius:8px;overflow:hidden"><iframe src="{e(emb,quote=True)}" width="100%" height="420" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="border:0;display:block"></iframe></div>')
+    if meta["review"]:parts.append(f'<h3 style="text-align:center">{title} - Film Review and Analysis</h3>'+"".join(f"<p>{e(p)}</p>" for p in meta["review"]))
+    if meta["themes"]:parts.append('<h3 style="text-align:center">Themes</h3><ul>'+''.join(f'<li>{e(x)}</li>' for x in meta["themes"])+'</ul>')
+    parts.append('<hr style="border:0;border-top:1px solid rgba(255,255,255,.5);margin:22px 0"/><h3 style="text-align:center">Download Links</h3>')
+    for x in downloads:
+        parts.append(f'<h4 style="text-align:center;color:#fff;font-size:19px">{title} {x["target"]}p x264 [{human(x["size"])}]</h4><a class="mv-dl" data-url="{e(x["link"],quote=True)}" href="{e(x["link"],quote=True)}" rel="noopener" style="display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;text-align:center;color:#fff;font-weight:800;font-size:19px;text-decoration:none;background:linear-gradient(90deg,#57a51c,#1f4fb4);box-shadow:0 8px 14px rgba(0,0,0,.45)">&#11015;&#9889; DOWNLOAD NOW &#9889;&#11015;</a>')
+    if meta["faq"]:parts.append(f'<h3 style="text-align:center">{title} - FAQ</h3>'+''.join(f'<h4>{e(str(f["q"]))}</h4><p>{e(str(f["a"]))}</p>' for f in meta["faq"]))
+    parts.append('<h3 style="text-align:center;color:#f0a0ff">Winding Up &#10084;&#65039;</h3>');parts.append(TIMER);return "\n".join(parts)
+
+# ---------------- Blogger safe verification ----------------
+def blogger_created_ok(post_id,title):
+    try:
+        p=blogger.posts().get(blogId=BLOG_ID,postId=post_id,fetchBody=False).execute()
+        return str(p.get("id"))==str(post_id)
+    except Exception as e:log("  Blogger GET verification:",e)
+    try:
+        r=blogger.posts().search(blogId=BLOG_ID,q=title,fetchBodies=False).execute()
+        return any(str(x.get("id"))==str(post_id) for x in r.get("items",[]))
+    except Exception as e:log("  Blogger search verification:",e)
+    return False
+
+def find_existing_post(title):
+    try:
+        r=blogger.posts().search(blogId=BLOG_ID,q=title,fetchBodies=False).execute()
+        for p in r.get("items",[]):
+            if str(p.get("title","")).strip()==str(title).strip():
+                return p
+    except Exception as e:
+        log("  Existing-post check warning:",e)
+    return None
+
+def create_post(body):
+    existing=find_existing_post(body["title"])
+    if existing and existing.get("id"):
+        log("  Existing Blogger post found; not creating a duplicate:",existing.get("id"))
+        return existing
+    # Do NOT retry posts.insert automatically: if Blogger creates the post but the
+    # HTTP response is lost, a retry can create a duplicate.
+    try:
+        post=blogger.posts().insert(blogId=BLOG_ID,body=body,isDraft=not PUBLISH,fetchBody=False).execute()
+    except Exception as e:
+        # One last search handles the case where the server created the post but
+        # the client received an error/timeout.
+        recovered=find_existing_post(body["title"])
+        if recovered and recovered.get("id"):
+            log("  Blogger insert reported an error, but the post was found afterward; treating it as success.")
+            return recovered
+        raise
+    pid=post.get("id")
+    if not pid:raise RuntimeError("Blogger insert returned no post ID")
+    log("  Blogger post created:",pid,post.get("url") or "")
+    if blogger_created_ok(pid,body["title"]):log("  Blogger post verified.")
+    else:log("  WARNING: Blogger create succeeded but API verification returned no confirmation; NOT retrying create to avoid duplicate post.")
+    return post
+
+# ---------------- Process ----------------
+def target_resolutions(w,h):
+    short=min(w,h);t=sorted(x for x in RESOLUTIONS if x<=short)
+    return t or [even(short)]
+
+def process(video,processed_folder):
+    name=video["name"];job=WORK/video["id"];job.mkdir(parents=True,exist_ok=True);src=str(job/"source.mp4");slug=re.sub(r"[^a-zA-Z0-9]+","-",Path(name).stem).strip("-").lower() or "movie"
+    log(f"\n=== Processing: {name} ===");download(video["id"],src);dur,w,h,fps=probe(src);log(f"  Source: {w}x{h}, {fps:.2f}fps, {dur/60:.1f} min")
+    frames,audio=analysis_inputs(src,dur,job);labels=site_labels();meta=analyze(name,frames,audio,labels);log("  Title:",meta["title"]);targets=target_resolutions(w,h);log("  Targets:",targets)
+    downloads=[];vcdn=None;vcdn_target=max(targets)
     for target in targets:
-
-        out = str(
-            job
-            / f"{slug}_{target}p.mp4"
-        )
-
-        log(
-            f"\nConverting to "
-            f"{target}p..."
-        )
-
-        transcode(
-            src,
-            target,
-            w,
-            h,
-            out
-        )
-
-        size = os.path.getsize(
-            out
-        )
-
-        log(
-            f"  Created "
-            f"{target}p: "
-            f"{human(size)}"
-        )
-
-        # ---------------- DRIVE UPLOAD ----------------
-
-        log(
-            f"Uploading {target}p "
-            "to Google Drive..."
-        )
-
-        fid = upload_public(
-            out,
-            output_folder,
-            "video/mp4"
-        )
-
-        outputs.append(
-            (
-                target,
-                fid,
-                size
-            )
-        )
-
-        # ---------------- VCDN ----------------
-
-        if target == vcdn_target:
-
-            log(
-                f"Uploading highest "
-                f"resolution ({target}p) "
-                "to VCDN..."
-            )
-
-            vcdn = vcdn_upload(
-                out,
-                meta["title"]
-            )
-
-        # Free local disk
-        try:
-            os.remove(out)
-        except Exception:
-            pass
-
-    # ---------------- VCDN VALIDATION ----------------
-
-    if (
-        not vcdn
-        or not vcdn.get("embed_url")
-    ):
-
-        raise RuntimeError(
-            "VCDN upload did not return "
-            "an embeddable player URL."
-        )
-
-    # ---------------- IMAGES TO DRIVE ----------------
-
-    log(
-        "Uploading images..."
-    )
-
-    thumb_id = upload_public(
-        thumb,
-        output_folder,
-        "image/jpeg"
-    )
-
-    shot_ids = [
-        upload_public(
-            p,
-            output_folder,
-            "image/jpeg"
-        )
-        for p in shots
-    ]
-
-    # ---------------- LABELS ----------------
-
-    labels = list(
-        meta["labels"]
-    )
-
-    if not labels:
-
-        unc = next(
-            (
-                l
-                for l in site_labels
-                if l.lower()
-                == "uncategorized"
-            ),
-            None
-        )
-
-        if unc:
-
-            labels = [
-                unc
-            ]
-
-        else:
-
-            labels = (
-                [
-                    g
-                    for g in meta["genres"]
-                ][:2]
-                +
-                [
-                    meta["language"]
-                ]
-            )
-
-    labels = [
-        str(l)[:40]
-        for l in labels
-        if l
-    ][:8]
-
-    # ---------------- BLOGGER HTML ----------------
-
-    content = build_html(
-        meta,
-        thumb_id,
-        shot_ids,
-        outputs,
-        fps,
-        dur,
-        vcdn
-    )
-
-    ytxt = (
-        f' ({meta["release_year"]})'
-        if meta["release_year"]
-        else ""
-    )
-
-    ltxt = (
-        f' {meta["language"]}'
-        if meta["language"].lower()
-        != "unknown"
-        else ""
-    )
-
-    body = {
-        "kind":
-            "blogger#post",
-
-        "title":
-            f'{meta["title"]}'
-            f'{ytxt}'
-            f'{ltxt} '
-            "Movie - Watch Online "
-            "& Download",
-
-        "content":
-            content,
-
-        "labels":
-            labels,
-    }
-
-    # ---------------- BLOGGER CREATE ----------------
-
-    log(
-        "\nCreating Blogger post..."
-    )
-
-    post = retry(
-        lambda:
-            blogger.posts().insert(
-                blogId=BLOG_ID,
-                body=body,
-                isDraft=not PUBLISH
-            ).execute()
-    )
-
-    post_id = post.get(
-        "id"
-    )
-
-    post_url = post.get(
-        "url"
-    )
-
-    log(
-        "Blogger post created:"
-    )
-
-    log(
-        "  ID:",
-        post_id
-    )
-
-    log(
-        "  URL:",
-        post_url
-        or "not returned"
-    )
-
-    log(
-        "  Mode:",
-        "PUBLISHED"
-        if PUBLISH
-        else "DRAFT"
-    )
-
-    # ---------------- VERIFY BLOGGER ----------------
-
-    if post_id:
-
-        try:
-
-            verified = retry(
-                lambda:
-                    blogger.posts().get(
-                        blogId=BLOG_ID,
-                        postId=post_id
-                    ).execute()
-            )
-
-            if not verified.get("id"):
-
-                raise RuntimeError(
-                    "Blogger post verification "
-                    "failed."
-                )
-
-            log(
-                "Blogger post verified."
-            )
-
-        except Exception as verify_error:
-
-            raise RuntimeError(
-                "Blogger post was created "
-                "but verification failed: "
-                f"{verify_error}"
-            ) from verify_error
-
-    # ========================================================
-    # ONLY NOW MOVE ORIGINAL DRIVE VIDEO TO PROCESSED
-    # ========================================================
-
-    log(
-        "All processing completed."
-    )
-
-    log(
-        "Moving original Drive video "
-        "to _processed..."
-    )
-
-    drive.files().update(
-        fileId=video["id"],
-        addParents=processed_folder,
-        removeParents=INPUT_FOLDER,
-        fields="id,parents"
-    ).execute()
-
-    log(
-        "Original Drive video moved "
-        "to _processed."
-    )
-
-    # ---------------- LOCAL CLEANUP ----------------
-
-    shutil.rmtree(
-        job,
-        ignore_errors=True
-    )
-
-    log(
-        "Local job cleaned."
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
+        out=str(job/f"{slug}_{target}p.mp4");transcode(src,target,w,h,out);size=os.path.getsize(out);st=st_upload(out);fid=st.get("id") or st.get("linkid");
+        if not fid:raise RuntimeError(f"Streamtape file ID missing for {out}: {st}")
+        downloads.append({"target":target,"link":st["link"],"id":fid,"size":size})
+        if target==vcdn_target:vcdn=vcdn_upload(out,meta["title"])
+        os.remove(out)
+    if not vcdn or not vcdn.get("embed_url"):raise RuntimeError("VCDN did not return embed URL")
+    thumb_url=st_splash(downloads[-1]["id"])
+    content=build_html(meta,thumb_url,downloads,vcdn,dur,fps)
+    year=f" ({meta['release_year']})" if meta["release_year"] else "";lang=f" {meta['language']}" if meta["language"].lower()!="unknown" else "";labs=meta["labels"] or (meta["genres"][:2]+([meta["language"]] if meta["language"]!="Unknown" else []));labs=[str(x)[:40] for x in labs if x][:8]
+    body={"kind":"blogger#post","title":f"{meta['title']}{year}{lang} Movie - Watch Online & Download","content":content,"labels":labs};post=create_post(body)
+    # Only after all external publication steps succeed, move source out of input.
+    move_source(video["id"],processed_folder);log("  Original Drive source moved to _processed.");shutil.rmtree(job,ignore_errors=True);log("  Local job cleaned.")
 
 def main():
-
-    WORK.mkdir(
-        exist_ok=True
-    )
-
-    videos = list_videos()
-
-    if not videos:
-
-        log(
-            "No new videos in "
-            "the input folder. "
-            "Nothing to do."
-        )
-
-        return 0
-
-    processed = ensure_folder(
-        "_processed"
-    )
-
-    output = ensure_folder(
-        "_output"
-    )
-
-    failed = 0
-
+    WORK.mkdir(exist_ok=True);videos=list_videos()
+    if not videos:log("No new videos.");return 0
+    processed=ensure_folder("_processed");failed=0
     for video in videos[:MAX_VIDEOS]:
+        try:process(video,processed)
+        except Exception as e:
+            failed+=1;log("\n================================\nMOVIE PROCESSING FAILED\n================================");log(str(e));traceback.print_exc();log("Original Drive source was NOT moved to _processed.")
+    return 1 if failed else 0
 
-        try:
-
-            process(
-                video,
-                processed,
-                output
-            )
-
-        except Exception as error:
-
-            failed += 1
-
-            log(
-                "\n================================"
-            )
-
-            log(
-                "MOVIE PROCESSING FAILED"
-            )
-
-            log(
-                "================================"
-            )
-
-            log(
-                f"Error: {error}"
-            )
-
-            traceback.print_exc()
-
-            log(
-                "Original Drive source "
-                "was NOT moved to _processed."
-            )
-
-    return (
-        1
-        if failed
-        else 0
-    )
-
-
-if __name__ == "__main__":
-
-    try:
-
-        sys.exit(
-            main()
-        )
-
+if __name__=="__main__":
+    try:sys.exit(main())
     finally:
-
-        try:
-
-            if WORK.exists():
-
-                shutil.rmtree(
-                    WORK
-                )
-
-            log(
-                "Global local work "
-                "directory cleaned."
-            )
-
-        except Exception as cleanup_error:
-
-            log(
-                "Local cleanup warning: "
-                f"{cleanup_error}"
-            )
+        shutil.rmtree(WORK,ignore_errors=True)
+        log("Global local work directory cleaned.")
