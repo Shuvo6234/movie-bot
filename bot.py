@@ -435,8 +435,8 @@ def vcdn_upload(path, title):
             # Poll the video endpoint until VCDN finishes processing. The
             # documented API exposes GET /api/v1/videos/{id}; this prevents us
             # from publishing a player URL before the video is ready.
-            if status not in ("ready", "processed", "complete", "completed") or not embed_url:
-                deadline = time.time() + 45
+            if status not in ("ready", "processed") or not embed_url:
+                deadline = time.time() + 10 * 60
                 last_video = complete
                 while time.time() < deadline:
                     time.sleep(5)
@@ -456,18 +456,10 @@ def vcdn_upload(path, title):
                         or info.get("embedUrl")
                         or embed_url
                     )
-                    playback = info.get("playback") or {}
                     playback_url = (
                         info.get("playback_url")
                         or info.get("playbackUrl")
-                        or (playback.get("hls") if isinstance(playback, dict) else None)
                         or playback_url
-                    )
-                    embed_url = (
-                        info.get("embed_url")
-                        or info.get("embedUrl")
-                        or (playback.get("embed") if isinstance(playback, dict) else None)
-                        or embed_url
                     )
                     log(f"  VCDN processing status: {status}")
 
@@ -478,24 +470,10 @@ def vcdn_upload(path, title):
                             f"VCDN processing failed for {video_id}: {info}"
                         )
 
-            # Do not block the whole GitHub Actions job waiting for VCDN
-            # transcoding. The file can legitimately remain `uploaded` while
-            # VCDN processes it in the background. We already have a stable
-            # video ID, so publish the post and let the player retry/fallback.
-            if status not in ("ready", "processed", "complete", "completed"):
-                log("  VCDN is still processing; continuing without waiting for ready status.")
-
             # The embed URL is deterministic once a video ID exists. If the
             # status endpoint did not return one, construct it as documented.
             if not embed_url:
                 embed_url = f"https://embed.vcdn.me/{video_id}"
-
-            # The live API may return the embed URL/status but omit playback_url.
-            # VCDN's documented HLS URL is deterministic from the video ID, so
-            # use the master playlist as a fallback for the custom HLS player.
-            if not playback_url and status in ("ready", "processed", "complete", "completed", "uploaded"):
-                playback_url = f"https://stream.vcdn.me/{video_id}/master.m3u8"
-                log("  VCDN HLS URL was missing from API response; using documented master playlist:", playback_url)
 
             if not video_id or not embed_url:
                 raise RuntimeError(
@@ -806,41 +784,6 @@ TIMER_SCRIPT = """<script>
 </script>""" % WAIT_SECONDS
 
 
-
-def build_vcdn_player(playback_url, title, embed_url):
-    """Custom MV shell using VCDN official embed for reliable playback."""
-    safe_title = html.escape(str(title), quote=True)
-    safe_embed = html.escape(str(embed_url or ""), quote=True)
-    template = r'''<style>
-.mv-shell{position:relative;width:100%;aspect-ratio:16/9;min-height:220px;max-height:85vh;background:#000;overflow:hidden;margin:20px 0;border-radius:4px;font-family:Roboto,Arial,sans-serif}
-.mv-shell iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000;display:block}
-.mv-cover{position:absolute;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;background:#000;cursor:pointer}
-.mv-cover button{width:72px;height:72px;border:0;border-radius:50%;background:#36a34c;color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 18px rgba(0,0,0,.45);cursor:pointer}
-.mv-cover svg{width:34px;height:34px;fill:#fff;margin-left:4px}
-.mv-cover-text{position:absolute;bottom:14px;left:16px;right:16px;text-align:center;color:#fff;font-size:13px;text-shadow:0 1px 3px #000;opacity:.9}
-.mv-shell.playing .mv-cover{display:none}
-@media(max-width:600px){.mv-shell{min-height:210px}.mv-cover button{width:64px;height:64px}.mv-cover svg{width:30px;height:30px}}
-</style>
-<div class="mv-shell" id="mvShell">
-  <iframe src="__EMBED_URL__" title="__TITLE__" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen="true" frameborder="0"></iframe>
-  <div class="mv-cover" id="mvCover" role="button" tabindex="0" aria-label="Play video">
-    <button type="button" aria-label="Play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
-    <div class="mv-cover-text">Tap to play</div>
-  </div>
-</div>
-<script>
-/*<![CDATA[*/
-(function(){
-  var shell=document.getElementById('mvShell'),cover=document.getElementById('mvCover');
-  function start(){shell.classList.add('playing');}
-  cover.onclick=start;
-  cover.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();start();}};
-})();
-/*]]>*/
-</script>
-'''
-    return template.replace('__TITLE__', safe_title).replace('__EMBED_URL__', safe_embed)
-
 def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     e = html.escape
     title = e(meta["title"])
@@ -896,21 +839,18 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts += [f"<p>{p}</p>" for p in syn]
 
     parts.append(f"<h3>Watch {title} Online</h3>")
-    playback_url = (
-        vcdn.get("playback_url")
-        or vcdn.get("playbackUrl")
-        or ((vcdn.get("playback") or {}).get("hls")
-            if isinstance(vcdn.get("playback"), dict) else None)
-    )
-    if not playback_url and vcdn.get("id"):
-        playback_url = f"https://stream.vcdn.me/{vcdn['id']}/master.m3u8"
-    if not playback_url:
-        raise RuntimeError(
-            f"VCDN did not provide a usable HLS playback URL for the custom player: {vcdn}"
-        )
-    embed_url = (vcdn.get("embed_url") or vcdn.get("embedUrl") or
-                 (f"https://embed.vcdn.me/{vcdn['id']}" if vcdn.get("id") else ""))
-    parts.append(build_vcdn_player(playback_url, meta["title"], embed_url))
+    embed_url = vcdn["embed_url"]
+    parts.append(
+        f'<div style="width:100%;max-width:100%;background:#000;border-radius:8px;'
+        f'overflow:hidden;margin:0 auto 24px">'
+        f'<iframe src="{e(embed_url, quote=True)}" '
+        'width="100%" height="420" frameborder="0" '
+        'allow="autoplay; encrypted-media; picture-in-picture" '
+        'allowfullscreen="true" style="border:0;display:block"></iframe>'
+        f'</div>')
+    parts.append(
+        '<p style="text-align:center;font-size:13px;opacity:.8">'
+        'Adaptive streaming player powered by VCDN.</p>')
 
     if review:
         parts.append(h3.format(f"{title} - Film Review and Analysis"))
