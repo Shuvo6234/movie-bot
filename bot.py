@@ -173,67 +173,199 @@ def st_splash(file_id):
     except Exception as e:log("  Streamtape splash warning:",e);return ""
 
 # ---------------- VCDN ----------------
+# Canonical VCDN REST API host. The documented upload flow is:
+# init -> POST chunks -> complete -> poll video status.
 VCDN_HOST="cdn.vcdn.me"
+VCDN_CHUNK_SIZE=8*1024*1024
+VCDN_MIN_CHUNK_SIZE=256*1024
+
 
 def vheaders(ct=None):
-    h={"Authorization":f"Bearer {VCDN_API_KEY}","X-API-Key":VCDN_API_KEY,"Accept":"application/json","User-Agent":"MovieBot/1.0"}
-    if ct:h["Content-Type"]=ct
+    h={
+        "Authorization":f"Bearer {VCDN_API_KEY}",
+        "X-API-Key":VCDN_API_KEY,
+        "Accept":"application/json",
+        "User-Agent":"MovieBot/1.0",
+    }
+    if ct:
+        h["Content-Type"]=ct
     return h
 
-def vjson(method,path,payload=None):
-    body=json.dumps(payload).encode() if payload is not None else None;h=vheaders("application/json" if payload is not None else None)
-    def f():
-        req=urllib.request.Request("https://"+VCDN_HOST+path,data=body,headers=h,method=method)
+
+def vjson(method,path,payload=None,timeout=120):
+    body=json.dumps(payload).encode() if payload is not None else None
+    headers=vheaders("application/json" if payload is not None else None)
+    def request_once():
+        req=urllib.request.Request(
+            "https://"+VCDN_HOST+path,
+            data=body,
+            headers=headers,
+            method=method,
+        )
         try:
-            with urllib.request.urlopen(req,timeout=120) as r:return json.loads(r.read().decode("utf-8","replace") or "{}")
-        except urllib.error.HTTPError as e:raise RuntimeError(f"VCDN {method} {path}: HTTP {e.code}: {e.read().decode('utf-8','replace')[:2000]}")
-    return retry(f,tries=4,delay=3)
+            with urllib.request.urlopen(req,timeout=timeout) as r:
+                raw=r.read().decode("utf-8","replace")
+                return json.loads(raw or "{}")
+        except urllib.error.HTTPError as e:
+            detail=e.read().decode("utf-8","replace")[:3000]
+            raise RuntimeError(f"VCDN {method} {path}: HTTP {e.code}: {detail}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"VCDN {method} {path}: network error: {e}")
+    return retry(request_once,tries=4,delay=3)
+
+
+def vcdn_upload_chunk(upload_id,chunk,start,total_size,is_final=False):
+    """Upload one sequential chunk to VCDN's documented chunk endpoint."""
+    end=start+len(chunk)-1
+    path=f"/api/v1/upload/{urllib.parse.quote(str(upload_id),safe='')}/chunk"
+    headers=vheaders("application/octet-stream")
+    headers["Content-Length"]=str(len(chunk))
+
+    def request_once():
+        req=urllib.request.Request(
+            "https://"+VCDN_HOST+path,
+            data=chunk,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req,timeout=1800) as r:
+                raw=r.read().decode("utf-8","replace")
+                return r.status,raw
+        except urllib.error.HTTPError as e:
+            detail=e.read().decode("utf-8","replace")[:3000]
+            raise RuntimeError(f"VCDN chunk HTTP {e.code}: {detail}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"VCDN chunk network error: {e}")
+
+    return retry(request_once,tries=4,delay=4)
+
 
 def vcdn_upload(path,title):
-    size=os.path.getsize(path);log(f"Uploading {os.path.basename(path)} to VCDN ({size} bytes)...")
-    # Direct endpoint first; 413 falls back to documented chunk API.
-    try:
-        boundary="----MovieBotVCDN7MA4YWxk";prefix=(f"--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\n{title}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{os.path.basename(path)}\"\r\nContent-Type: video/mp4\r\n\r\n").encode();suffix=f"\r\n--{boundary}--\r\n".encode();pfx=len(prefix)+size+len(suffix)
-        c=http.client.HTTPSConnection("api.vcdn.me",timeout=1800);c.putrequest("POST","/videos");h=vheaders(f"multipart/form-data; boundary={boundary}");h["Content-Length"]=str(pfx)
-        for k,v in h.items():c.putheader(k,v)
-        c.endheaders();c.send(prefix);sent=0;last=-1
-        with open(path,"rb") as f:
-            while True:
-                b=f.read(16*1024*1024)
-                if not b:break
-                c.send(b);sent+=len(b);pct=int(sent*100/size)
-                if pct>=last+10 or pct==100:log(f"  VCDN upload {pct}%");last=pct
-        c.send(suffix);r=c.getresponse();raw=r.read().decode("utf-8","replace");c.close()
-        if not 200<=r.status<300:raise RuntimeError(f"VCDN direct HTTP {r.status}: {raw[:2000]}")
-        d=json.loads(raw);vid=d.get("id") or d.get("video_id");emb=d.get("embed_url") or d.get("embedUrl")
-        if vid and not emb:emb=f"https://embed.vcdn.me/embed/{vid}"
-        if not vid:raise RuntimeError(f"VCDN direct response has no id: {d}")
-        return {"id":vid,"embed_url":emb,"playback_url":d.get("playback_url") or d.get("playbackUrl"),"status":d.get("status")}
-    except Exception as direct:
-        log("  VCDN direct upload failed; trying chunked:",direct)
-    init=vjson("POST","/api/v1/upload/init",{"filename":os.path.basename(path),"title":title,"size":size})
-    uid=init.get("upload_id") or init.get("uploadId");url=init.get("upload_url") or init.get("uploadUrl")
-    if not uid:raise RuntimeError(f"VCDN init missing upload id: {init}")
-    target=url or f"https://{VCDN_HOST}/api/v1/upload/{uid}/chunk";p=urllib.parse.urlsplit(target);c=http.client.HTTPSConnection(p.netloc,timeout=1800);c.putrequest("POST",p.path or "/");h=vheaders("application/octet-stream");h["Content-Length"]=str(size)
-    for k,v in h.items():c.putheader(k,v)
-    c.endheaders();sent=0;last=-1
-    with open(path,"rb") as f:
-        while True:
-            b=f.read(16*1024*1024)
-            if not b:break
-            c.send(b);sent+=len(b);pct=int(sent*100/size)
-            if pct>=last+10 or pct==100:log(f"  VCDN chunk upload {pct}%");last=pct
-    r=c.getresponse();raw=r.read().decode("utf-8","replace");c.close()
-    if not 200<=r.status<300:raise RuntimeError(f"VCDN chunk HTTP {r.status}: {raw[:2000]}")
-    complete=vjson("POST","/api/v1/upload/complete",{"uploadId":uid});vid=complete.get("id") or complete.get("video_id") or complete.get("videoId")
-    if not vid:raise RuntimeError(f"VCDN complete missing id: {complete}")
-    emb=complete.get("embed_url") or complete.get("embedUrl");play=complete.get("playback_url") or complete.get("playbackUrl");status=complete.get("status")
-    deadline=time.time()+600
-    while time.time()<deadline and (not emb or status not in ("ready","processed","complete","completed")):
-        if status in ("failed","error"):raise RuntimeError(f"VCDN processing failed: {complete}")
-        time.sleep(5);info=vjson("GET",f"/api/v1/videos/{urllib.parse.quote(str(vid),safe='')}");status=info.get("status") or status;emb=info.get("embed_url") or info.get("embedUrl") or emb;play=info.get("playback_url") or info.get("playbackUrl") or play;log("  VCDN status:",status)
-    if not emb:emb=f"https://embed.vcdn.me/embed/{vid}"
-    return {"id":vid,"embed_url":emb,"playback_url":play,"status":status}
+    size=os.path.getsize(path)
+    name=os.path.basename(path)
+    log(f"Uploading {name} to VCDN ({size} bytes)...")
+
+    # Do not use the /videos multipart endpoint here. In the previous run it
+    # returned HTTP 413 for a ~20 MB file. The documented upload API is safer:
+    # init -> chunk -> complete.
+    init=vjson(
+        "POST",
+        "/api/v1/upload/init",
+        {"filename":name,"title":title},
+        timeout=120,
+    )
+
+    upload_id=init.get("upload_id") or init.get("uploadId")
+    if not upload_id:
+        raise RuntimeError(f"VCDN init did not return upload_id: {init}")
+
+    log("  VCDN upload ID:",upload_id)
+
+    # Start at 8 MB. If the VCDN reverse proxy rejects that chunk with 413,
+    # restart the upload with 4 MB, then 1 MB. This avoids ever sending the
+    # whole video as one HTTP request.
+    chunk_size=VCDN_CHUNK_SIZE
+    last_error=None
+    upload_success=False
+
+    while chunk_size>=VCDN_MIN_CHUNK_SIZE:
+        try:
+            sent=0
+            last_pct=-1
+            with open(path,"rb") as f:
+                while sent<size:
+                    want=min(chunk_size,size-sent)
+                    chunk=f.read(want)
+                    if not chunk:
+                        raise RuntimeError("Unexpected end of file during VCDN upload")
+
+                    vcdn_upload_chunk(upload_id,chunk,sent,size,sent+len(chunk)>=size)
+                    sent+=len(chunk)
+                    pct=int(sent*100/size) if size else 100
+                    if pct>=last_pct+5 or pct==100:
+                        log(f"  VCDN upload {pct}% ({sent}/{size} bytes)")
+                        last_pct=pct
+
+            log(f"  VCDN chunks uploaded successfully using {chunk_size//1024//1024} MB chunks")
+            upload_success=True
+            break
+
+        except RuntimeError as e:
+            last_error=e
+            msg=str(e)
+            if "HTTP 413" not in msg and "Request Entity Too Large" not in msg:
+                raise
+            if chunk_size//2<VCDN_MIN_CHUNK_SIZE:
+                break
+            chunk_size//=2
+            log(f"  VCDN chunk too large; retrying upload with {chunk_size//1024//1024} MB chunks")
+            # A failed init/upload may have left an incomplete upload object.
+            # Create a fresh upload session before restarting from byte 0.
+            init=vjson(
+                "POST",
+                "/api/v1/upload/init",
+                {"filename":name,"title":title},
+                timeout=120,
+            )
+            upload_id=init.get("upload_id") or init.get("uploadId")
+            if not upload_id:
+                raise RuntimeError(f"VCDN retry init did not return upload_id: {init}")
+            log("  New VCDN upload ID:",upload_id)
+
+    if not upload_success:
+        raise RuntimeError(f"VCDN upload failed: {last_error}")
+
+    # The VCDN API uses snake_case: upload_id.
+    complete=vjson(
+        "POST",
+        "/api/v1/upload/complete",
+        {"upload_id":upload_id},
+        timeout=120,
+    )
+
+    vid=complete.get("id") or complete.get("video_id") or complete.get("videoId")
+    if not vid:
+        raise RuntimeError(f"VCDN complete did not return video id: {complete}")
+
+    emb=complete.get("embed_url") or complete.get("embedUrl")
+    play=complete.get("playback_url") or complete.get("playbackUrl")
+    status=str(complete.get("status") or "processing").lower()
+
+    if not emb:
+        emb=f"https://embed.vcdn.me/{vid}"
+
+    deadline=time.time()+900
+    while time.time()<deadline:
+        if status in ("failed","error"):
+            raise RuntimeError(f"VCDN processing failed: {complete}")
+
+        if status in ("ready","processed","complete","completed"):
+            break
+
+        time.sleep(5)
+        info=vjson(
+            "GET",
+            f"/api/v1/videos/{urllib.parse.quote(str(vid),safe='')}",
+            timeout=120,
+        )
+        status=str(info.get("status") or status).lower()
+        emb=info.get("embed_url") or info.get("embedUrl") or emb
+        play=info.get("playback_url") or info.get("playbackUrl") or play
+        log("  VCDN status:",status)
+
+    if status in ("failed","error"):
+        raise RuntimeError(f"VCDN processing failed for {vid}")
+    if not emb:
+        emb=f"https://embed.vcdn.me/{vid}"
+
+    log("  VCDN ready:",emb)
+    return {
+        "id":vid,
+        "embed_url":emb,
+        "playback_url":play,
+        "status":status,
+    }
 
 # ---------------- FFmpeg ----------------
 def parse_fps(v):
@@ -288,8 +420,27 @@ def analyze(name,frames,audio,labels):
     parts=[types.Part.from_bytes(data=b,mime_type="image/jpeg") for b in frames]+[types.Part.from_bytes(data=audio,mime_type="audio/mp3")];data={}
     for model in dict.fromkeys([GEMINI_MODEL,"gemini-flash-latest"]):
         try:
-            r=retry(lambda:gclient.models.generate_content(model=model,contents=[prompt,*parts],config=types.GenerateContentConfig(response_mime_type="application/json")),tries=2,delay=4);data=json.loads(re.sub(r"^```json|```$","",r.text.strip(),flags=re.I).strip());log("  Gemini:",model);break
-        except Exception as e:log("  Gemini failed:",e)
+            r=retry(
+                lambda:gclient.models.generate_content(
+                    model=model,
+                    contents=[prompt,*parts],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                ),
+                tries=2,
+                delay=4
+            )
+            data=json.loads(re.sub(r"^```json|```$","",r.text.strip(),flags=re.I).strip())
+            log("  Gemini:",model)
+            break
+        except Exception as e:
+            msg=str(e)
+            log("  Gemini failed:",e)
+            # A 429 free-tier quota error is a daily/project limit. Trying a
+            # second model immediately usually wastes another request and does
+            # not help, so fall back to filename-based metadata.
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+                log("  Gemini quota exhausted; using safe fallback metadata.")
+                break
     syn=data.get("synopsis") or ["An original film."];syn=syn if isinstance(syn,list) else re.split(r"\n\s*\n",str(syn))
     canon={x.lower():x for x in labels};chosen=[canon[x.strip().lower()] for x in data.get("labels",[]) if str(x).strip().lower() in canon][:4]
     return {"title":str(data.get("title") or hint or "Untitled Film").strip(),"tagline":str(data.get("tagline") or "").strip(),"synopsis":[str(x).strip() for x in syn if str(x).strip()],"review":[str(x).strip() for x in (data.get("review") or [])],"themes":[str(x) for x in data.get("themes",[])][:5],"faq":[x for x in data.get("faq",[]) if isinstance(x,dict) and x.get("q") and x.get("a")][:4],"genres":[str(x) for x in data.get("genres",["Drama"])][:3],"language":str(data.get("language") or LANGUAGE_HINT or "Unknown"),"release_year":year,"content_rating":str(data.get("content_rating") or "General audience"),"tags":[str(x) for x in data.get("tags",[])][:6],"labels":chosen}
