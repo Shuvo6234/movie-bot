@@ -848,10 +848,6 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
         'allow="autoplay; encrypted-media; picture-in-picture" '
         'allowfullscreen="true" style="border:0;display:block"></iframe>'
         f'</div>')
-    parts.append(
-        '<p style="text-align:center;font-size:13px;opacity:.8">'
-        'Adaptive streaming player powered by VCDN.</p>')
-
     if review:
         parts.append(h3.format(f"{title} - Film Review and Analysis"))
         parts += [f"<p>{p}</p>" for p in review]
@@ -860,8 +856,14 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
         parts.append("<ul>" + "".join(f"<li>{e(t)}</li>" for t in meta["themes"]) + "</ul>")
     parts.append(h3.format("Screenshots"))
     for fid in shot_ids:
-        parts.append(f'<p style="text-align:center"><img src="{img_url(fid)}" alt="{title} screenshot" '
-                     'style="max-width:100%;height:auto"/></p>')
+        parts.append(
+            f'<div style="width:100%;max-width:900px;height:500px;'
+            f'margin:0 auto 18px;overflow:hidden;border-radius:10px;'
+            f'background:#000">'
+            f'<img src="{img_url(fid)}" alt="{title} screenshot" '
+            'style="width:100%;height:100%;object-fit:cover;'
+            'object-position:center;display:block"/></div>'
+        )
     parts.append(hr)
     parts.append(h3.format("Download Links"))
     for h, fid, size in outputs:
