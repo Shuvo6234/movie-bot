@@ -857,12 +857,11 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts.append(h3.format("Screenshots"))
     for fid in shot_ids:
         parts.append(
-            f'<div style="width:100%;max-width:900px;height:500px;'
-            f'margin:0 auto 18px;overflow:hidden;border-radius:10px;'
-            f'background:#000">'
+            f'<div style="width:100%;max-width:900px;margin:0 auto 18px;'
+            f'overflow:hidden;border-radius:10px;background:#000;text-align:center">'
             f'<img src="{img_url(fid)}" alt="{title} screenshot" '
-            'style="width:100%;height:100%;object-fit:cover;'
-            'object-position:center;display:block"/></div>'
+            'style="width:100%;height:auto;max-height:700px;object-fit:contain;'
+            'object-position:center;display:block;margin:0 auto"/></div>'
         )
     parts.append(hr)
     parts.append(h3.format("Download Links"))
@@ -915,10 +914,6 @@ def process(video, processed_folder, output_folder):
     outputs = []
     vcdn = None
 
-    # Keep the highest generated resolution for VCDN.
-    # VCDN then provides adaptive HLS/multi-quality playback.
-    vcdn_target = max(targets)
-
     for t in targets:
         out = str(job / f"{slug}_{t}p.mp4")
         log(f"Converting to {t}p...")
@@ -928,10 +923,14 @@ def process(video, processed_folder, output_folder):
         fid = upload_public(out, output_folder, "video/mp4")
         outputs.append((t, fid, size))
 
-        if t == vcdn_target:
-            vcdn = vcdn_upload(out, meta["title"])
-
         os.remove(out)  # free disk
+
+    # Upload the ORIGINAL source to VCDN so its adaptive HLS pipeline gets
+    # the highest-quality source available, instead of only the generated
+    # 720p/1080p download file. This is what gives VCDN the best chance to
+    # create lower adaptive renditions such as 480p.
+    log("Uploading original source to VCDN for adaptive HLS...")
+    vcdn = vcdn_upload(src, meta["title"])
 
     if not vcdn or not vcdn.get("embed_url"):
         raise RuntimeError("VCDN upload did not return an embeddable player URL.")
