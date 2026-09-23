@@ -531,21 +531,44 @@ def probe(path):
 
 
 def make_screenshots(src, dur, w, h, outdir):
-    """Create screenshots cropped to a true 16:9 frame (1280x720)."""
-    if w / h >= 16 / 9:
-        ch = max(2, (h // 2) * 2)
-        cw = max(2, int(h * 16 / 9) // 2 * 2)
-        cw = min(cw, (w // 2) * 2)
+    """Create true 16:9 screenshots (1280x720) by center-cropping the source.
+    No padding or background is added, so the generated image itself has no black borders.
+    """
+    src_ratio = w / h
+
+    if src_ratio > (16 / 9):
+        # Wider than 16:9: crop the left and right sides.
+        cw = int(h * 16 / 9)
+        ch = h
+    elif src_ratio < (16 / 9):
+        # Taller/narrower than 16:9: crop the top and bottom.
+        cw = w
+        ch = int(w * 9 / 16)
     else:
-        cw = max(2, (w // 2) * 2)
-        ch = max(2, int(w * 9 / 16) // 2 * 2)
-        ch = min(ch, (h // 2) * 2)
+        cw = w
+        ch = h
+
+    # Crop dimensions must be even for reliable JPEG/FFmpeg output.
+    cw = max(2, (cw // 2) * 2)
+    ch = max(2, (ch // 2) * 2)
+
     files = []
     for i in range(SCREENSHOTS):
         t = dur * (i + 1) / (SCREENSHOTS + 1)
         p = str(outdir / f"shot_{i + 1}.jpg")
-        run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", src,
-             "-frames:v", "1", "-vf", f"crop={cw}:{ch},scale=1280:720", "-q:v", "3", p])
+        vf = (
+            f"crop={cw}:{ch}:(iw-{cw})/2:(ih-{ch})/2,"
+            "scale=1280:720:flags=lanczos"
+        )
+        run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{t:.2f}", "-i", src,
+            "-frames:v", "1",
+            "-vf", vf,
+            "-q:v", "2",
+            "-pix_fmt", "yuvj420p",
+            p,
+        ])
         files.append(p)
     return files
 
@@ -866,9 +889,9 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts.append(h3.format("Screenshots"))
     for fid in shot_ids:
         parts.append(
-            f'<div style="width:100%;max-width:1280px;margin:0 auto 18px;line-height:0;">'
+            f'<div style="width:100%;max-width:1280px;margin:0 auto 18px;line-height:0;padding:0;background:none;">'
             f'<img src="{img_url(fid)}" alt="{title} screenshot" '
-            'style="display:block;width:100%;height:auto;aspect-ratio:16/9;object-fit:cover;object-position:center;margin:0;padding:0;border:0"/>'
+            'style="display:block;width:100%;height:auto;max-width:1280px;margin:0;padding:0;border:0;outline:0;box-shadow:none"/>'
             f'</div>'
         )
 
