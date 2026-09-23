@@ -900,8 +900,6 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts += [f"<p>{p}</p>" for p in syn]
 
     parts.append(f"<h3>Watch {title} Online</h3>")
-    embed_url = vcdn["embed_url"]
-    parts.append(f"<h3>Watch {title} Online</h3>")
 embed_url = vcdn["embed_url"]
 parts.append(
     f'<div style="position:relative;width:100%;max-width:100%;padding-top:56.25%;'
