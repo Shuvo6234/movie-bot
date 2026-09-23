@@ -531,35 +531,63 @@ def probe(path):
 
 
 def make_screenshots(src, dur, w, h, outdir):
-    """Create true 16:9 screenshots (1280x720) by center-cropping the source.
-    No padding or background is added, so the generated image itself has no black borders.
-    """
-    src_ratio = w / h
+    """Create screenshots with black letterbox bars removed, then crop to 16:9."""
+    files = []
 
-    if src_ratio > (16 / 9):
-        # Wider than 16:9: crop the left and right sides.
-        cw = int(h * 16 / 9)
-        ch = h
-    elif src_ratio < (16 / 9):
-        # Taller/narrower than 16:9: crop the top and bottom.
-        cw = w
-        ch = int(w * 9 / 16)
+    # First detect any encoded black bars (letterboxing) in the source.
+    # This is different from simply cropping the source to 16:9: a 16:9
+    # video can itself contain black bars inside its picture area.
+    detected = None
+    detect_t = dur * 0.35
+    try:
+        proc = subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "info",
+            "-ss", f"{detect_t:.2f}", "-i", src,
+            "-frames:v", "1",
+            "-vf", "cropdetect=limit=24:round=2:reset=0",
+            "-f", "null", "-"
+        ], capture_output=True, text=True, check=True)
+        text = (proc.stderr or "") + (proc.stdout or "")
+        matches = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", text)
+        if matches:
+            cw, ch, cx, cy = map(int, matches[-1])
+            # Only accept a meaningful crop; otherwise keep the full frame.
+            if cw >= int(w * 0.70) and ch >= int(h * 0.70):
+                detected = (cw, ch, cx, cy)
+                log(f"  Screenshot black-bar detection: crop={cw}:{ch}:{cx}:{cy}")
+    except Exception as ex:
+        log("  Screenshot black-bar detection skipped:", ex)
+
+    if detected:
+        base_w, base_h, base_x, base_y = detected
     else:
-        cw = w
-        ch = h
+        base_w, base_h, base_x, base_y = w, h, 0, 0
 
-    # Crop dimensions must be even for reliable JPEG/FFmpeg output.
+    # From the bar-free picture, make a genuine 16:9 center crop.
+    ratio = base_w / base_h
+    if ratio > 16 / 9:
+        cw = int(base_h * 16 / 9)
+        ch = base_h
+        cx = base_x + (base_w - cw) // 2
+        cy = base_y
+    elif ratio < 16 / 9:
+        cw = base_w
+        ch = int(base_w * 9 / 16)
+        cx = base_x
+        cy = base_y + (base_h - ch) // 2
+    else:
+        cw, ch = base_w, base_h
+        cx, cy = base_x, base_y
+
     cw = max(2, (cw // 2) * 2)
     ch = max(2, (ch // 2) * 2)
+    cx = max(0, int(cx))
+    cy = max(0, int(cy))
 
-    files = []
     for i in range(SCREENSHOTS):
         t = dur * (i + 1) / (SCREENSHOTS + 1)
         p = str(outdir / f"shot_{i + 1}.jpg")
-        vf = (
-            f"crop={cw}:{ch}:(iw-{cw})/2:(ih-{ch})/2,"
-            "scale=1280:720:flags=lanczos"
-        )
+        vf = f"crop={cw}:{ch}:{cx}:{cy},scale=1280:720:flags=lanczos"
         run([
             "ffmpeg", "-y", "-loglevel", "error",
             "-ss", f"{t:.2f}", "-i", src,
@@ -570,6 +598,7 @@ def make_screenshots(src, dur, w, h, outdir):
             p,
         ])
         files.append(p)
+
     return files
 
 
