@@ -23,13 +23,18 @@ jobs:
 
       - name: Run Movie Bot
         env:
-          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
-          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
-          IA_IDENTIFIER_PREFIX: movie-bot
+          BLOG_ID: ${{ secrets.BLOG_ID }}
+          DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
+
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
+          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
+          IA_IDENTIFIER_PREFIX: ${{ secrets.IA_IDENTIFIER_PREFIX }}
+
         run: |
           python "python bot.py"
