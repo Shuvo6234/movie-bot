@@ -61,4 +61,4 @@ jobs:
           DIRECTOR_NAME: ""
 
         run: |
-          python bot.py 
+          python bot.py
