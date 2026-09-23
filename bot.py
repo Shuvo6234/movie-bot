@@ -345,16 +345,11 @@ def _vcdn_direct_upload(path, title):
 
 def vcdn_upload(path, title):
     """
-    Upload a video to VCDN.
-
-    VCDN's public homepage currently documents the simple REST upload:
-        POST https://api.vcdn.me/videos
-        Authorization: Bearer <key>
-        multipart fields: file, title
-
-    We use that route first because it avoids the live upload-init validation
-    mismatch seen on cdn.vcdn.me. If the direct REST route is unavailable,
-    we fall back to the documented chunked route.
+    Upload a video to VCDN using the documented API:
+      POST /api/v1/upload/init      (with ladderProfile for multi-resolution)
+      POST /api/v1/upload/{id}/chunk
+      POST /api/v1/upload/complete
+      GET  /api/v1/videos/{id}      (poll until ready)
     """
     log(f"Uploading {os.path.basename(path)} to VCDN...")
 
@@ -362,143 +357,83 @@ def vcdn_upload(path, title):
     if file_size <= 0:
         raise RuntimeError(f"VCDN upload file is empty: {path}")
 
-    # Primary: the REST endpoint shown on VCDN's current homepage.
-    try:
-        log(f"  VCDN file size: {file_size} bytes")
-        return _vcdn_direct_upload(path, title)
-    except Exception as direct_error:
-        log(f"  VCDN direct REST upload failed: {direct_error}")
+    log(f"  VCDN file size: {file_size} bytes")
 
-        # A 413 from api.vcdn.me means that endpoint's request-size limit was
-        # exceeded. Do not retry the same large multipart request; use the
-        # chunked upload API instead.
-        direct_text = str(direct_error)
-        if "HTTP 413" in direct_text or "413 Request Entity Too Large" in direct_text:
-            log("  VCDN direct endpoint rejected the file as too large; switching to chunked upload.")
+    init = _vcdn_json(
+        "POST",
+        "/api/v1/upload/init",
+        {
+            "filename": os.path.basename(path),
+            "title": title,
+            "size": file_size,
+            "contentType": "video/mp4",
+            "ladderProfile": "full",
+        },
+    )
 
-        # Fallback: chunked API. The live endpoint requires a positive size.
+    upload_id = init.get("upload_id") or init.get("uploadId")
+    upload_url = init.get("upload_url") or init.get("uploadUrl")
+    if not upload_id:
+        raise RuntimeError(f"VCDN init did not return upload_id/uploadId: {init}")
+
+    log(f"  VCDN upload id: {upload_id}")
+    if upload_url:
+        log(f"  VCDN upload URL: {upload_url}")
+    _vcdn_upload_binary(upload_id, path, upload_url)
+
+    complete = _vcdn_json("POST", "/api/v1/upload/complete", {"uploadId": upload_id})
+
+    video_id = (
+        complete.get("id")
+        or complete.get("video_id")
+        or complete.get("videoId")
+        or upload_id
+    )
+    status = complete.get("status")
+    embed_url = complete.get("embed_url") or complete.get("embedUrl")
+    playback_url = complete.get("playback_url") or complete.get("playbackUrl")
+
+    deadline = time.time() + 15 * 60
+    last_video = complete
+    while time.time() < deadline:
+        if status == "ready" and embed_url:
+            break
+        if status in ("failed", "error"):
+            raise RuntimeError(f"VCDN processing failed for {video_id}: {last_video}")
+        time.sleep(5)
         try:
-            init = _vcdn_json(
-                "POST",
-                "/api/v1/upload/init",
-                {
-                    "filename": os.path.basename(path),
-                    "title": title,
-                    "size": file_size,
-                },
+            info = _vcdn_json(
+                "GET",
+                f"/api/v1/videos/{urllib.parse.quote(str(video_id), safe='')}"
             )
-            # The live VCDN endpoint currently returns camelCase fields
-            # (uploadId/uploadUrl), while the public docs show snake_case.
-            upload_id = init.get("upload_id") or init.get("uploadId")
-            upload_url = init.get("upload_url") or init.get("uploadUrl")
-            if not upload_id:
-                raise RuntimeError(
-                    f"VCDN init did not return upload_id/uploadId: {init}"
-                )
+        except Exception as poll_error:
+            log(f"  VCDN status check failed: {poll_error}")
+            continue
+        last_video = info or last_video
+        status = info.get("status") or status
+        embed_url = info.get("embed_url") or info.get("embedUrl") or embed_url
+        playback_url = info.get("playback_url") or info.get("playbackUrl") or playback_url
+        progress = info.get("transcode_progress")
+        log(f"  VCDN status: {status} progress: {progress}")
 
-            log(f"  VCDN chunk upload id: {upload_id}")
-            if upload_url:
-                log(f"  VCDN chunk upload URL: {upload_url}")
-            _vcdn_upload_binary(upload_id, path, upload_url)
+    if not embed_url:
+        embed_url = f"https://embed.vcdn.me/embed/{video_id}"
 
-            # The live VCDN API returns camelCase `uploadId` from /init
-            # and expects the same field name in /complete.
-            complete = _vcdn_json(
-                "POST",
-                "/api/v1/upload/complete",
-                {"uploadId": upload_id},
-            )
+    if not video_id or not embed_url:
+        raise RuntimeError(f"VCDN returned no usable player data: {last_video}")
 
-            # The live API currently returns `videoId` (camelCase), while the
-            # public docs show `id`. Accept both forms. `status=uploaded` means
-            # the file is received but transcoding may still be in progress.
-            video_id = (
-                complete.get("id")
-                or complete.get("video_id")
-                or complete.get("videoId")
-            )
-            embed_url = (
-                complete.get("embed_url")
-                or complete.get("embedUrl")
-            )
-            playback_url = (
-                complete.get("playback_url")
-                or complete.get("playbackUrl")
-            )
-            status = complete.get("status")
+    log("  VCDN video:", video_id)
+    log("  VCDN embed:", embed_url)
+    if playback_url:
+        log("  VCDN HLS:", playback_url)
+    log("  VCDN final status:", status or "unknown")
 
-            if not video_id:
-                raise RuntimeError(
-                    f"VCDN complete returned no video id: {complete}"
-                )
-
-            # Poll the video endpoint until VCDN finishes processing. The
-            # documented API exposes GET /api/v1/videos/{id}; this prevents us
-            # from publishing a player URL before the video is ready.
-            if status not in ("ready", "processed") or not embed_url:
-                deadline = time.time() + 10 * 60
-                last_video = complete
-                while time.time() < deadline:
-                    time.sleep(5)
-                    try:
-                        info = _vcdn_json(
-                            "GET",
-                            f"/api/v1/videos/{urllib.parse.quote(str(video_id), safe='')}"
-                        )
-                    except Exception as poll_error:
-                        log(f"  VCDN status check failed: {poll_error}")
-                        continue
-
-                    last_video = info or last_video
-                    status = info.get("status") or status
-                    embed_url = (
-                        info.get("embed_url")
-                        or info.get("embedUrl")
-                        or embed_url
-                    )
-                    playback_url = (
-                        info.get("playback_url")
-                        or info.get("playbackUrl")
-                        or playback_url
-                    )
-                    log(f"  VCDN processing status: {status}")
-
-                    if status in ("ready", "processed", "complete", "completed"):
-                        break
-                    if status in ("failed", "error"):
-                        raise RuntimeError(
-                            f"VCDN processing failed for {video_id}: {info}"
-                        )
-
-            # The embed URL is deterministic once a video ID exists. If the
-            # status endpoint did not return one, construct it as documented.
-            if not embed_url:
-                embed_url = f"https://embed.vcdn.me/{video_id}"
-
-            if not video_id or not embed_url:
-                raise RuntimeError(
-                    f"VCDN complete/status returned no usable player data: {last_video}"
-                )
-
-            log("  VCDN video:", video_id)
-            log("  VCDN embed:", embed_url)
-            if playback_url:
-                log("  VCDN HLS:", playback_url)
-            log("  VCDN final status:", status or "unknown")
-
-            return {
-                "id": video_id,
-                "embed_url": embed_url,
-                "playback_url": playback_url,
-                "status": status,
-            }
-
-        except Exception as chunk_error:
-            raise RuntimeError(
-                "VCDN upload failed using both upload methods.\n"
-                f"Direct REST error: {direct_error}\n"
-                f"Chunked API error: {chunk_error}"
-            ) from chunk_error
+    return {
+        "id": video_id,
+        "embed_url": embed_url,
+        "playback_url": playback_url,
+        "status": status,
+    }
 
 
 # ---------- ffmpeg helpers ----------
