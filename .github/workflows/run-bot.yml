@@ -6,6 +6,7 @@ on:
 jobs:
   movie-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout repository
@@ -15,33 +16,49 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            google-genai \
+            google-auth \
+            google-api-python-client \
+            google-auth-httplib2 \
+            google-auth-oauthlib
+
+      - name: Check FFmpeg
+        run: |
           ffmpeg -version
           ffprobe -version
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
       - name: Run Movie Bot
         env:
-          BLOG_ID: ${{ secrets.BLOG_ID }}
-          DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
-
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
-          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
-          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
-          IA_IDENTIFIER_PREFIX: ${{ secrets.IA_IDENTIFIER_PREFIX }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BLOG_ID: ${{ secrets.BLOG_ID }}
+          DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
+
+          VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
+
+          GEMINI_MODEL: gemini-3.6-flash
+          RESOLUTIONS: 480,720,1080
+          MAX_VIDEOS: 1
+          PUBLISH: false
+          LANGUAGE_HINT: ""
+          AUDIO_MINUTES: 10
+          SCREENSHOTS: 6
+          WAIT_SECONDS: 20
+          DIRECTOR_NAME: ""
 
         run: |
-          python "python bot.py"
+          python bot.py
