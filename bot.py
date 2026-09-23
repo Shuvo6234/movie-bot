@@ -367,7 +367,7 @@ def vcdn_upload(path, title):
             "title": title,
             "size": file_size,
             "contentType": "video/mp4",
-            "ladderProfile": "full",
+            "ladderProfile": "standard",
         },
     )
 
