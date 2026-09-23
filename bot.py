@@ -900,16 +900,17 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts += [f"<p>{p}</p>" for p in syn]
 
     parts.append(f"<h3>Watch {title} Online</h3>")
-embed_url = vcdn["embed_url"]
-parts.append(
-    f'<div style="position:relative;width:100%;max-width:100%;padding-top:56.25%;'
-    f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 24px">'
-    f'<iframe src="{e(embed_url, quote=True)}" '
-    'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
-    'frameborder="0" '
-    'allow="autoplay; encrypted-media; picture-in-picture" '
-    'allowfullscreen="true"></iframe>'
-    f'</div>')
+    embed_url = vcdn["embed_url"]
+    parts.append(
+        f'<div style="position:relative;width:100%;max-width:100%;padding-top:56.25%;'
+        f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 24px">'
+        f'<iframe src="{e(embed_url, quote=True)}" '
+        'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
+        'frameborder="0" '
+        'allow="autoplay; encrypted-media; picture-in-picture" '
+        'allowfullscreen="true"></iframe>'
+        f'</div>')
+
     if review:
         parts.append(h3.format(f"{title} - Film Review and Analysis"))
         parts += [f"<p>{p}</p>" for p in review]
