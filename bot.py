@@ -416,11 +416,13 @@ def vcdn_upload(path, title):
         progress = info.get("transcode_progress")
         log(f"  VCDN status: {status} progress: {progress}")
 
-    if not embed_url:
-        embed_url = f"https://embed.vcdn.me/embed/{video_id}"
+    if not embed_url and video_id:
+        embed_url = f"https://embed.vcdn.me/{video_id}"
+    if not playback_url and video_id:
+        playback_url = f"https://stream.vcdn.me/{video_id}/master.m3u8"
 
-    if not video_id or not embed_url:
-        raise RuntimeError(f"VCDN returned no usable player data: {last_video}")
+    if not video_id or not playback_url:
+        raise RuntimeError(f"VCDN returned no usable HLS playback data: {last_video}")
 
     log("  VCDN video:", video_id)
     log("  VCDN embed:", embed_url)
@@ -835,16 +837,138 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts += [f"<p>{p}</p>" for p in syn]
 
     parts.append(f"<h3>Watch {title} Online</h3>")
-    embed_url = vcdn["embed_url"]
-    parts.append(
-        f'<div style="position:relative;width:100%;max-width:100%;padding-top:56.25%;'
-        f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 24px">'
-        f'<iframe src="{e(embed_url, quote=True)}" '
-        'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
-        'frameborder="0" '
-        'allow="fullscreen *; autoplay *; encrypted-media *; picture-in-picture *" '
-        'allowfullscreen></iframe>'
-        f'</div>')
+    hls_url = vcdn.get("playback_url")
+    player_key = re.sub(r"[^a-zA-Z0-9_]", "_", str(vcdn.get("id") or "movie"))
+    player_id = f"mvplayer_{player_key}"
+    video_id = f"{player_id}_video"
+    play_id = f"{player_id}_play"
+    seek_id = f"{player_id}_seek"
+    volume_id = f"{player_id}_volume"
+    quality_id = f"{player_id}_quality"
+    speed_id = f"{player_id}_speed"
+    fs_id = f"{player_id}_fs"
+    time_id = f"{player_id}_time"
+    status_id = f"{player_id}_status"
+    hls_js = "https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js"
+
+    parts.append(f"""<div id="{player_id}" style="position:relative;width:100%;max-width:100%;margin:0 auto 24px;background:#000;border-radius:8px;overflow:hidden;box-shadow:0 4px 18px rgba(0,0,0,.45);">
+  <div style="position:relative;width:100%;aspect-ratio:16/9;background:#000;overflow:hidden;">
+    <video id="{video_id}" playsinline webkit-playsinline preload="metadata" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:block;"></video>
+    <div id="{status_id}" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font:600 14px Arial,sans-serif;background:rgba(0,0,0,.18);pointer-events:none;">Loading video...</div>
+  </div>
+  <div style="padding:10px 12px 12px;background:#111;color:#fff;font-family:Arial,sans-serif;">
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">
+      <button id="{play_id}" type="button" style="border:0;background:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 7px;">▶</button>
+      <input id="{seek_id}" type="range" min="0" max="100" value="0" step="0.1" style="flex:1;min-width:120px;accent-color:#fff;cursor:pointer;">
+      <span id="{time_id}" style="font-size:12px;white-space:nowrap;">0:00 / 0:00</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:9px;flex-wrap:wrap;">
+      <span style="font-size:12px;">🔊</span>
+      <input id="{volume_id}" type="range" min="0" max="1" value="1" step="0.05" style="width:90px;accent-color:#fff;cursor:pointer;">
+      <select id="{quality_id}" style="background:#222;color:#fff;border:1px solid #555;border-radius:4px;padding:5px 7px;font-size:12px;cursor:pointer;"><option value="-1">Auto</option></select>
+      <select id="{speed_id}" style="background:#222;color:#fff;border:1px solid #555;border-radius:4px;padding:5px 7px;font-size:12px;cursor:pointer;">
+        <option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="1.75">1.75x</option><option value="2">2x</option>
+      </select>
+      <button id="{fs_id}" type="button" style="margin-left:auto;border:0;background:none;color:#fff;font-size:18px;cursor:pointer;padding:4px 7px;" aria-label="Fullscreen">⛶</button>
+    </div>
+  </div>
+</div>
+<script src="{hls_js}"></script>
+<script>
+(function() {{
+  var root = document.getElementById('{player_id}');
+  var video = document.getElementById('{video_id}');
+  var play = document.getElementById('{play_id}');
+  var seek = document.getElementById('{seek_id}');
+  var volume = document.getElementById('{volume_id}');
+  var quality = document.getElementById('{quality_id}');
+  var speed = document.getElementById('{speed_id}');
+  var fs = document.getElementById('{fs_id}');
+  var time = document.getElementById('{time_id}');
+  var status = document.getElementById('{status_id}');
+  var src = {json.dumps(hls_url)};
+  var hls = null;
+
+  function fmt(sec) {{
+    sec = Number.isFinite(sec) ? Math.max(0, sec) : 0;
+    var m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+    return m + ':' + String(s).padStart(2, '0');
+  }}
+  function setStatus(msg, show) {{
+    status.textContent = msg || '';
+    status.style.display = show ? 'flex' : 'none';
+  }}
+  function updatePlay() {{ play.textContent = video.paused ? '▶' : '❚❚'; }}
+  function updateTime() {{
+    var d = video.duration || 0;
+    time.textContent = fmt(video.currentTime) + ' / ' + fmt(d);
+    seek.value = d ? (video.currentTime / d) * 100 : 0;
+  }}
+  function fillQualities() {{
+    while (quality.options.length > 1) quality.remove(1);
+    if (!hls || !hls.levels) return;
+    var seen = {{}};
+    hls.levels.forEach(function(level, i) {{
+      var label = level.height ? level.height + 'p' : ((level.bitrate || 0) / 1000) + ' kbps';
+      if (seen[label]) label += ' ' + (i + 1);
+      seen[label] = true;
+      var opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = label;
+      quality.appendChild(opt);
+    }});
+  }}
+  play.addEventListener('click', function() {{
+    if (video.paused) video.play().catch(function() {{}}); else video.pause();
+  }});
+  video.addEventListener('play', updatePlay);
+  video.addEventListener('pause', updatePlay);
+  video.addEventListener('timeupdate', updateTime);
+  video.addEventListener('loadedmetadata', updateTime);
+  video.addEventListener('canplay', function() {{ setStatus('', false); }});
+  video.addEventListener('waiting', function() {{ setStatus('Buffering...', true); }});
+  video.addEventListener('playing', function() {{ setStatus('', false); }});
+  video.addEventListener('error', function() {{ setStatus('Unable to play this video.', true); }});
+  seek.addEventListener('input', function() {{
+    if (video.duration) video.currentTime = (Number(seek.value) / 100) * video.duration;
+  }});
+  volume.addEventListener('input', function() {{ video.volume = Number(volume.value); video.muted = video.volume === 0; }});
+  speed.addEventListener('change', function() {{ video.playbackRate = Number(speed.value); }});
+  quality.addEventListener('change', function() {{
+    if (hls) hls.currentLevel = Number(quality.value);
+  }});
+  fs.addEventListener('click', function() {{
+    if (document.fullscreenElement || document.webkitFullscreenElement) {{
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      return;
+    }}
+    if (root.requestFullscreen) root.requestFullscreen().catch(function() {{}});
+    else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+    else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+  }});
+
+  if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+    video.src = src;
+    video.addEventListener('loadedmetadata', function() {{ setStatus('', false); }});
+  }} else if (window.Hls && Hls.isSupported()) {{
+    hls = new Hls({{ enableWorker:true, capLevelToPlayerSize:false }});
+    hls.loadSource(src);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, function() {{ fillQualities(); setStatus('', false); }});
+    hls.on(Hls.Events.LEVELS_UPDATED, fillQualities);
+    hls.on(Hls.Events.ERROR, function(event, data) {{
+      if (data && data.fatal) {{
+        setStatus('Streaming error. Please refresh and try again.', true);
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+      }}
+    }});
+  }} else {{
+    setStatus('This browser does not support HLS playback.', true);
+  }}
+}})();
+</script>""")
 
     if review:
         parts.append(h3.format(f"{title} - Film Review and Analysis"))
@@ -930,8 +1054,8 @@ def process(video, processed_folder, output_folder):
     log("Uploading original source to VCDN for adaptive HLS...")
     vcdn = vcdn_upload(src, meta["title"])
 
-    if not vcdn or not vcdn.get("embed_url"):
-        raise RuntimeError("VCDN upload did not return an embeddable player URL.")
+    if not vcdn or not vcdn.get("playback_url"):
+        raise RuntimeError("VCDN upload did not return an HLS playback URL.")
 
     log("Uploading images...")
     thumb_id = upload_public(thumb, output_folder, "image/jpeg")
