@@ -3,11 +3,9 @@ name: Movie Bot
 on:
   workflow_dispatch:
 
-  # Automatically check the Google Drive input folder about every 15 minutes.
   schedule:
     - cron: "7,22,37,52 * * * *"
 
-# Prevent two Movie Bot jobs from processing the same Drive video at once.
 concurrency:
   group: movie-bot
   cancel-in-progress: false
@@ -39,21 +37,17 @@ jobs:
             ~/.cache/movie-bot/llama
           key: movie-bot-local-ai-v2-${{ runner.os }}-x64-qwen3-vl-4b
 
-      - name: Prepare Local AI cache directories
+      - name: Prepare Local AI cache
         run: |
           mkdir -p "$HOME/.local/bin"
           mkdir -p "$HOME/.cache/movie-bot/llama"
 
-          echo "Local AI cache status:"
-          du -sh "$HOME/.local/bin" 2>/dev/null || true
-          du -sh "$HOME/.cache/movie-bot/llama" 2>/dev/null || true
-
       - name: Install FFmpeg if needed
         run: |
           if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
-            echo "FFmpeg already available. Skipping apt install."
+            echo "FFmpeg already available."
           else
-            echo "FFmpeg not found. Installing..."
+            echo "Installing FFmpeg..."
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
@@ -63,40 +57,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Check files
+      - name: Check environment
         run: |
-          echo "Current directory:"
-          pwd
-          echo ""
-          echo "Repository files:"
-          ls -la
-          echo ""
-          echo "Python files:"
-          find . -maxdepth 3 -type f -name "*.py" -print
-
-      - name: Check FFmpeg and Local AI
-        run: |
-          echo "FFmpeg:"
-          ffmpeg -version | head -n 1
-          ffprobe -version | head -n 1
-
-          echo ""
           echo "Python:"
           python --version
 
-          echo ""
-          echo "llama.cpp:"
-          if [ -x "$HOME/.local/bin/llama" ]; then
-            "$HOME/.local/bin/llama" --version || true
-          elif [ -x "$HOME/.local/bin/llama-cli" ]; then
-            "$HOME/.local/bin/llama-cli" --version || true
-          else
-            echo "llama.cpp is not cached yet. It will be installed only if Gemini fallback is needed."
-          fi
+          echo "FFmpeg:"
+          ffmpeg -version | head -n 1
 
-          echo ""
-          echo "Qwen/Hugging Face cache:"
-          du -sh "$HOME/.cache/movie-bot/llama" 2>/dev/null || true
+          echo "FFprobe:"
+          ffprobe -version | head -n 1
+
+          echo "Repository:"
+          ls -la
 
       - name: Run Movie Bot
         env:
@@ -127,4 +100,10 @@ jobs:
           LOCAL_AI_THREADS: "4"
           LOCAL_AI_MAX_IMAGES: "12"
 
-         
+          LLAMA_CACHE: /home/runner/.cache/movie-bot/llama
+          HF_HUB_CACHE: /home/runner/.cache/movie-bot/llama
+          HUGGINGFACE_HUB_CACHE: /home/runner/.cache/movie-bot/llama
+
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          python bot.py
