@@ -1862,9 +1862,12 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
         f'<div style="position:relative;width:100%;padding-top:56.25%;'
         f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 28px">'
         f'<iframe src="{e(embed_url, quote=True)}" '
-        'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
-        'frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" '
-        'allowfullscreen="true"></iframe>'
+'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
+'frameborder="0" '
+'allow="autoplay; encrypted-media; picture-in-picture; fullscreen" '
+'allowfullscreen="true" '
+'webkitallowfullscreen="true" '
+'mozallowfullscreen="true"></iframe>'
         f'</div>'
     )
 
