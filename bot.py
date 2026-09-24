@@ -421,9 +421,16 @@ def vcdn_upload(path, title):
         if status in ("failed", "error"):
             raise RuntimeError(f"VCDN processing failed for {video_id}: {last_video}")
 
-        # We require BOTH the documented ready state and a real playback URL.
-        # A URL returned while status=processing is not treated as playable yet.
-        if status == "ready" and playback_url:
+        # IMPORTANT: VCDN's documented ready state is the terminal processing
+        # state.  Do NOT keep polling just because playback_url was not present
+        # in this particular response.  The status endpoint/webhook can expose
+        # playback under a nested `playback.hls` field, and the documented HLS
+        # URL can also be constructed from the ready video id.
+        if str(status).lower() == "ready":
+            playback_url = extract_playback(last_video) or playback_url
+            if not playback_url and video_id:
+                playback_url = f"https://stream.vcdn.me/{video_id}/master.m3u8"
+            log("  VCDN status is READY; stopping status polling.")
             break
 
         poll_number += 1
@@ -454,12 +461,15 @@ def vcdn_upload(path, title):
                     or info.get("progress"))
         log(f"  VCDN status: {status} progress: {progress}")
 
-    if status != "ready":
+    if str(status).lower() != "ready":
         raise RuntimeError(
             "VCDN video did not reach the ready state within 60 minutes; "
             "Blogger post was not created. Last response: " +
             json.dumps(last_video, ensure_ascii=False)[:4000]
         )
+
+    if str(status).lower() == "ready" and not playback_url and video_id:
+        playback_url = f"https://stream.vcdn.me/{video_id}/master.m3u8"
 
     if not video_id or not playback_url:
         raise RuntimeError(
