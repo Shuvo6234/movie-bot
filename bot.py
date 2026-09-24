@@ -6,6 +6,7 @@ Movie Bot: Drive video -> multi-resolution -> VCDN Watch Online
 Runs on GitHub Actions. All settings come from environment variables.
 """
 import hashlib
+import difflib
 import base64
 import html
 import http.client
@@ -1255,6 +1256,139 @@ def _gemini_multimodal_json_rest(model, prompt, frames, audio_bytes=None):
     return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip())
 
 
+def _gemini_imdb_lookup(title, year=None, language=""):
+    """Look up an IMDb rating through Gemini Google Search grounding.
+
+    We only accept a rating when Gemini returns an IMDb source URL and the
+    matched title/year are reasonably consistent. Otherwise return N/A.
+    """
+    title = str(title or "").strip()
+    if not title:
+        return "N/A"
+
+    year_text = str(year) if year else ""
+    prompt = f"""Search the web for the exact movie/title below and verify its IMDb rating.
+Movie title: {title}
+Release year: {year_text or 'unknown'}
+Language: {language or 'unknown'}
+
+IMPORTANT:
+- Use ONLY the official IMDb website (imdb.com) as the source for the rating.
+- Do NOT guess or invent a rating.
+- Match the title and release year carefully. If the title/year cannot be confidently matched,
+  return rating as N/A.
+- If IMDb has no displayed rating, return N/A.
+- Return ONLY JSON with exactly these keys:
+  matched_title: exact IMDb title if found, otherwise "",
+  matched_year: year if found, otherwise null,
+  rating: IMDb aggregate rating such as "7.2/10", otherwise "N/A",
+  imdb_url: official IMDb title URL if found, otherwise ""
+"""
+
+    models = []
+    for m in [
+        os.environ.get("IMDB_GEMINI_MODEL", "gemini-2.5-flash"),
+        GEMINI_MODEL,
+        "gemini-2.5-flash",
+    ]:
+        if m and m not in models:
+            models.append(m)
+
+    for model in models:
+        for attempt in range(1, 3):
+            try:
+                payload = {
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "tools": [{"google_search": {}}],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.0,
+                    },
+                }
+                endpoint = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    + urllib.parse.quote(model, safe="")
+                    + ":generateContent?key="
+                    + urllib.parse.quote(GEMINI_KEY, safe="")
+                )
+                req = urllib.request.Request(
+                    endpoint,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "MovieBot/1.0"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    response = json.loads(resp.read().decode("utf-8", "replace"))
+
+                texts = []
+                imdb_sources = []
+                for candidate in response.get("candidates") or []:
+                    for part in (candidate.get("content") or {}).get("parts") or []:
+                        if part.get("text"):
+                            texts.append(part["text"])
+                    gm = candidate.get("groundingMetadata") or candidate.get("grounding_metadata") or {}
+                    for chunk in gm.get("groundingChunks") or gm.get("grounding_chunks") or []:
+                        web = chunk.get("web") or {}
+                        uri = web.get("uri") or web.get("url") or ""
+                        if "imdb.com" in uri.lower():
+                            imdb_sources.append(uri)
+
+                text = "\n".join(texts).strip()
+                if not text:
+                    raise RuntimeError("IMDb lookup returned no text")
+                data = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip())
+
+                matched_title = str(data.get("matched_title") or "").strip()
+                matched_year = data.get("matched_year")
+                rating = str(data.get("rating") or "N/A").strip()
+                imdb_url = str(data.get("imdb_url") or "").strip()
+                if not imdb_url and imdb_sources:
+                    imdb_url = imdb_sources[0]
+
+                # Strict validation: the URL must actually come from Gemini's
+                # IMDb grounding result, and the rating must be on IMDb's 1-10 scale.
+                normalized_returned = imdb_url.split("?")[0].rstrip("/").lower()
+                grounded_match = any(
+                    normalized_returned == src.split("?")[0].rstrip("/").lower()
+                    for src in imdb_sources
+                ) if imdb_sources else False
+                m = re.fullmatch(r"(?:10(?:\.0)?|[1-9](?:\.[0-9])?)/10", rating)
+                if not grounded_match or "imdb.com" not in imdb_url.lower() or not m:
+                    log(f"  IMDb lookup: no verified rating for '{title}'")
+                    return "N/A"
+
+                # Guard against an unrelated same-name result.
+                ratio = difflib.SequenceMatcher(
+                    None, re.sub(r"\W+", "", title.lower()),
+                    re.sub(r"\W+", "", matched_title.lower())
+                ).ratio() if matched_title else 0.0
+                year_ok = True
+                if year and matched_year:
+                    try:
+                        year_ok = int(matched_year) == int(year)
+                    except Exception:
+                        year_ok = False
+
+                if ratio < 0.72 or not year_ok:
+                    log(f"  IMDb lookup: title/year mismatch for '{title}' -> '{matched_title}' ({matched_year})")
+                    return "N/A"
+
+                log(f"  IMDb verified: {matched_title} ({matched_year or year_text}) = {rating}")
+                return rating
+
+            except urllib.error.HTTPError as ex:
+                if ex.code in (408, 429, 500, 502, 503, 504) and attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                log(f"  IMDb lookup via Gemini failed on {model}: HTTP {ex.code}")
+                break
+            except Exception as ex:
+                log(f"  IMDb lookup via Gemini failed on {model}: {ex}")
+                break
+
+    return "N/A"
+
+
 def analyze(filename_hint, frames, audio_bytes, site_labels):
     hint = clean_hint(filename_hint)
     year = find_year(filename_hint)
@@ -1270,7 +1404,6 @@ Rules:
 - If the filename looks like a genuine movie title, preserve that title when reasonably confident; otherwise create a clean cinematic title from the film content.
 - Title must be 1-6 words, with no hashtags, emojis, year, "trending reels", "watch online" or "download".
 - The website description must be concise and spoiler-light: 1-2 short paragraphs, about 80-140 words total.
-- Do NOT invent an IMDb rating. If this original film has no verified IMDb rating in the provided material, return "N/A".
 - Language should list the languages actually evident from the audio/filename when possible, for example "Hindi - English".
 - Original language should be the primary/original spoken language when reasonably identifiable; otherwise "Unknown".
 - Genres should be 1-3 suitable genres based on the film.
@@ -1281,7 +1414,7 @@ Return ONLY JSON with these keys:
   title: clean film title,
   tagline: one short sentence, max 18 words,
   description: 1-2 short paragraphs, about 80-140 words total, spoiler-light,
-  imdb_rating: verified IMDb rating only if it is actually known from the supplied material; otherwise "N/A",
+  imdb_rating: always return "N/A" here; IMDb will be verified separately through official IMDb search,
   language: display language(s), e.g. "Hindi - English",
   original_language: original/main language, e.g. "English",
   genres: list of 1-3 genres,
@@ -1339,11 +1472,14 @@ Return ONLY JSON with these keys:
         desc = ["An original film."]
 
     faq = [f for f in (data.get("faq") or []) if isinstance(f, dict) and f.get("q") and f.get("a")]
+    final_title = str(data.get("title") or hint or "Untitled Film").strip()
+    # IMDb is checked separately using official IMDb search grounding.
+    imdb_rating = _gemini_imdb_lookup(final_title, year, data.get("language") or LANGUAGE_HINT)
     return {
-        "title": str(data.get("title") or hint or "Untitled Film").strip(),
+        "title": final_title,
         "tagline": str(data.get("tagline") or "").strip(),
         "description": desc[:2],
-        "imdb_rating": str(data.get("imdb_rating") or "N/A").strip(),
+        "imdb_rating": imdb_rating,
         "language": str(data.get("language") or LANGUAGE_HINT or "Unknown").strip(),
         "original_language": str(data.get("original_language") or data.get("language") or LANGUAGE_HINT or "Unknown").strip(),
         "genres": [str(g).strip() for g in (data.get("genres") or ["Drama"]) if str(g).strip()][:3],
