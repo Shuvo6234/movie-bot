@@ -1,10 +1,11 @@
 
 """
 Movie Bot: Drive video -> multi-resolution -> VCDN Watch Online
-+ Google Drive downloads + screenshots + 9:16 thumbnail
++ Google Drive downloads + screenshots + 2:3 Google Image poster thumbnail
 -> Gemini title/description/labels -> Blogger post (draft by default).
 Runs on GitHub Actions. All settings come from environment variables.
 """
+import hashlib
 import html
 import http.client
 import json
@@ -1121,38 +1122,38 @@ def clean_hint(filename):
 def analyze(filename_hint, frames, audio_bytes, site_labels):
     hint = clean_hint(filename_hint)
     year = find_year(filename_hint)
-    prompt = f"""You are a film writer. You are publishing an ORIGINAL film, on its own director's film
-blog. You get 12 frames spread across the film and an audio sample.
+    prompt = f"""You are a film writer and metadata editor for an ORIGINAL movie blog.
+You get 12 frames spread across the film and an audio sample.
 File name hint (may be messy): "{hint}". Language hint (may be empty): "{LANGUAGE_HINT}".
 Director name (may be empty): "{DIRECTOR_NAME}".
 
 Rules:
 - Write everything in your own words, in natural English. Never copy text from any website, film or review.
-- Base it ONLY on what you can actually see and hear in the frames and audio. If you are unsure,
-  stay general and talk about mood, visuals, sound and themes instead of specific plot facts.
-- Never invent cast, crew, awards, festivals, ratings, box office or plot facts you cannot see.
-- No piracy words (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
-- The title must be a real film title of 1-6 words. No hashtags, emojis, year or words like "trending reels".
-  If the file name hint is messy, invent a fitting title from what the film is about.
+- Base movie facts ONLY on what you can actually see/hear and the filename hint. If uncertain, use a safe general value.
+- Do not invent cast, crew, awards, festivals, box office, IMDb pages, or exact plot facts.
+- If the filename looks like a genuine movie title, preserve that title when reasonably confident; otherwise create a clean cinematic title from the film content.
+- Title must be 1-6 words, with no hashtags, emojis, year, "trending reels", "watch online" or "download".
+- The website description must be concise and spoiler-light: 1-2 short paragraphs, about 80-140 words total.
+- Do NOT invent an IMDb rating. If this original film has no verified IMDb rating in the provided material, return "N/A".
+- Language should list the languages actually evident from the audio/filename when possible, for example "Hindi - English".
+- Original language should be the primary/original spoken language when reasonably identifiable; otherwise "Unknown".
+- Genres should be 1-3 suitable genres based on the film.
+- Content rating should be one of "General audience", "Teen and above", "Mature audience".
+- No piracy words in title/description/metadata (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
 
 Return ONLY JSON with these keys:
-  title: the film title,
-  tagline: one sentence, max 20 words,
-  synopsis: 2 short paragraphs (about 120 words), spoiler-light, separated by a blank line,
-  review: 3-4 paragraphs (about 300 words) analysing tone, visual style and camera work, sound and
-          music, performances in general terms, themes and who will enjoy the film,
-          separated by blank lines,
-  themes: list of 3-5 short phrases,
-  faq: list of 4 objects {{"q": "...", "a": "..."}} with 1-2 sentence answers about the film
-       (genre, language, mood, who it suits, runtime feel),
+  title: clean film title,
+  tagline: one short sentence, max 18 words,
+  description: 1-2 short paragraphs, about 80-140 words total, spoiler-light,
+  imdb_rating: verified IMDb rating only if it is actually known from the supplied material; otherwise "N/A",
+  language: display language(s), e.g. "Hindi - English",
+  original_language: original/main language, e.g. "English",
   genres: list of 1-3 genres,
-  language: main spoken language,
-  content_rating: one of "General audience", "Teen and above", "Mature audience",
+  content_rating: one of the allowed values,
   tags: list of up to 6 short keywords,
   labels: pick 1-4 categories that best fit this film, ONLY from this exact list
-          (copy the spelling exactly): {json.dumps(site_labels)}.
-          Judge by language spoken, film industry/country, and type (movie, web series,
-          trailer, song, etc.). Ignore labels about video encoding or file format."""
+          (copy spelling exactly): {json.dumps(site_labels)}.
+          Judge by language spoken, film industry/country, and type. Ignore encoding/file-format labels."""
     parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
     parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
     data = {}
@@ -1168,20 +1169,31 @@ Return ONLY JSON with these keys:
             log(f"  Gemini model {model} failed: {e}")
     if not data:
         log("  Using fallback text.")
+
+    desc = as_paragraphs(data.get("description"))
+    if not desc:
+        desc = as_paragraphs(data.get("synopsis"))
+    if not desc:
+        desc = ["An original film."]
+
     faq = [f for f in (data.get("faq") or []) if isinstance(f, dict) and f.get("q") and f.get("a")]
     return {
-        "title": data.get("title") or hint or "Untitled Film",
-        "tagline": data.get("tagline") or "",
-        "synopsis": as_paragraphs(data.get("synopsis")) or ["An original film."],
-        "review": as_paragraphs(data.get("review")),
-        "themes": [str(t) for t in (data.get("themes") or [])][:5],
-        "faq": faq[:4],
-        "genres": data.get("genres") or ["Drama"],
-        "language": data.get("language") or LANGUAGE_HINT or "Unknown",
+        "title": str(data.get("title") or hint or "Untitled Film").strip(),
+        "tagline": str(data.get("tagline") or "").strip(),
+        "description": desc[:2],
+        "imdb_rating": str(data.get("imdb_rating") or "N/A").strip(),
+        "language": str(data.get("language") or LANGUAGE_HINT or "Unknown").strip(),
+        "original_language": str(data.get("original_language") or data.get("language") or LANGUAGE_HINT or "Unknown").strip(),
+        "genres": [str(g).strip() for g in (data.get("genres") or ["Drama"]) if str(g).strip()][:3],
+        "content_rating": str(data.get("content_rating") or "General audience").strip(),
+        "tags": [str(t).strip() for t in (data.get("tags") or []) if str(t).strip()][:6],
         "release_year": year,
-        "content_rating": data.get("content_rating") or "General audience",
-        "tags": data.get("tags") or [],
         "labels": pick_labels(data.get("labels"), site_labels),
+        # Kept for compatibility with any other code that may read these fields.
+        "synopsis": desc[:2],
+        "review": [],
+        "themes": [],
+        "faq": faq[:4],
     }
 
 
@@ -1245,104 +1257,175 @@ TIMER_SCRIPT = """<script>
 </script>""" % WAIT_SECONDS
 
 
+def _post_colors(title):
+    """Pick a stable-but-different color theme per movie post."""
+    palettes = [
+        {"heading": "#ffbf00", "rating": "#18e000", "label": "#e8e8e8", "value": "#f5f5f5", "lang": "#ff3030", "quality": "#ff3030"},
+        {"heading": "#00d9ff", "rating": "#7dff2a", "label": "#ededed", "value": "#ffffff", "lang": "#ff4f81", "quality": "#ff4f81"},
+        {"heading": "#ff6b35", "rating": "#65ff4d", "label": "#eeeeee", "value": "#ffffff", "lang": "#ff2f92", "quality": "#ff2f92"},
+        {"heading": "#b56cff", "rating": "#48ff9b", "label": "#ededed", "value": "#ffffff", "lang": "#ff4d4d", "quality": "#ff4d4d"},
+        {"heading": "#ffd166", "rating": "#39ff14", "label": "#f0f0f0", "value": "#ffffff", "lang": "#00d9ff", "quality": "#00d9ff"},
+        {"heading": "#00e5a8", "rating": "#a8ff00", "label": "#ededed", "value": "#ffffff", "lang": "#ff3b30", "quality": "#ff3b30"},
+        {"heading": "#ff8c42", "rating": "#00ff7f", "label": "#eeeeee", "value": "#ffffff", "lang": "#ff4d6d", "quality": "#ff4d6d"},
+        {"heading": "#4dabf7", "rating": "#7cff00", "label": "#eeeeee", "value": "#ffffff", "lang": "#ff5c8a", "quality": "#ff5c8a"},
+    ]
+    digest = hashlib.sha256(str(title).encode("utf-8")).hexdigest()
+    return palettes[int(digest[:8], 16) % len(palettes)]
+
+
 def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     e = html.escape
-    title = e(meta["title"])
+    raw_title = str(meta["title"])
+    title = e(raw_title)
     year = meta["release_year"]
-    ytxt = f" ({year})" if year else ""
-    lang_known = meta["language"] and meta["language"].lower() != "unknown"
-    lang = e(meta["language"])
-    lang_tag = f' <span style="color:#f2f200">{{{lang}}}</span>' if lang_known else ""
-    genres = ", ".join(e(g) for g in meta["genres"])
+    lang_raw = str(meta.get("language") or "Unknown")
+    lang_known = lang_raw.lower() != "unknown"
+    lang = e(lang_raw)
+    original_lang = e(str(meta.get("original_language") or "Unknown"))
+    genres = ", ".join(e(g) for g in meta.get("genres", [])) or "Drama"
     fps_txt = fmt_fps(fps)
     qualities = " - ".join(f"{h}p" for h, _, _ in outputs)
     sizes = " - ".join(human(s) for _, _, s in outputs)
-    syn = [e(p) for p in meta["synopsis"]]
-    review = [e(p) for p in meta["review"]]
+    colors = _post_colors(raw_title)
 
-    btn = ("display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
-           "text-align:center;color:#fff;font-weight:800;font-size:19px;"
-           "text-decoration:none;cursor:pointer;"
-           "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
-           "box-shadow:0 8px 14px rgba(0,0,0,.45);")
-    head = ("text-align:center;color:#fff;font-size:21px;line-height:1.4;"
-            "margin:28px 0 18px;font-weight:800")
-    hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.6);margin:22px 0"/>'
-    h3 = '<h3 style="text-align:center">{}</h3>'
+    # Reference-style typography: dark theme is inherited from the Blogger post,
+    # while these inline colors make the Movie Info block visually similar to the
+    # supplied reference image. The palette changes deterministically per post.
+    info_title = (
+        f'<div style="text-align:center;margin:24px 0 22px;">'
+        f'<div style="font-size:34px;line-height:1.2;font-weight:800;'
+        f'color:{colors["heading"]};">Movie Info</div></div>'
+    )
 
-    info = [f"<b>Movie Name:</b> {title}"]
-    if year:
-        info.append(f"<b>Release Year:</b> {year}")
-    if DIRECTOR_NAME:
-        info.append(f"<b>Directed by:</b> {e(DIRECTOR_NAME)}")
-    if lang_known:
-        info.append(f"<b>Language:</b> {lang}")
-    info += [
-        f"<b>Runtime:</b> {fmt_runtime(dur)}",
-        f"<b>Genres:</b> {genres}",
-        f"<b>Content Advisory:</b> {e(meta['content_rating'])}",
-        f"<b>Quality:</b> {qualities}",
-        f"<b>Frame Rate:</b> {fps_txt}fps",
-        f"<b>Size:</b> {sizes}",
-    ]
-
-    parts = [
-        f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title}" '
-        f'width="270" style="max-width:60%;height:auto;border-radius:8px"/></div>',
-        f'<p style="text-align:center"><b>{title}{ytxt}</b>{" - " + lang + " film" if lang_known else ""}</p>',
-    ]
-    if meta["tagline"]:
-        parts.append(f'<p style="text-align:center"><i>{e(meta["tagline"])}</i></p>')
-    parts.append(f"<p>{syn[0]}</p>")
-    parts.append(h3.format("Movie Info"))
-    parts.append("<p>" + "<br/>".join(info) + "</p>")
-    parts.append(h3.format("Movie Synopsis / Plot"))
-    parts += [f"<p>{p}</p>" for p in syn]
-
-    parts.append(f"<h3>Watch {title} Online</h3>")
-    embed_url = vcdn["embed_url"]
-    parts.append(
-        f'<div style="position:relative;width:100%;max-width:100%;padding-top:56.25%;'
-        f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 24px">'
-        f'<iframe src="{e(embed_url, quote=True)}" '
-        'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
-        'frameborder="0" '
-        'allow="autoplay; encrypted-media; picture-in-picture" '
-        'allowfullscreen="true"></iframe>'
-        f'</div>')
-
-    if review:
-        parts.append(h3.format(f"{title} - Film Review and Analysis"))
-        parts += [f"<p>{p}</p>" for p in review]
-    if meta["themes"]:
-        parts.append(h3.format("Themes"))
-        parts.append("<ul>" + "".join(f"<li>{e(t)}</li>" for t in meta["themes"]) + "</ul>")
-    parts.append(h3.format("Screenshots"))
-    for fid in shot_ids:
-        parts.append(
-            f'<div style="width:100%;max-width:1920px;margin:0 auto 18px;line-height:0;padding:0;background:none;">'
-            f'<img src="{img_url(fid)}" alt="{title} screenshot" '
-            'style="display:block;width:100%;height:auto;max-width:1920px;margin:0;padding:0;border:0;outline:0;box-shadow:none"/>'
+    def row(label, value, value_color=None, emoji=""):
+        vc = value_color or colors["value"]
+        return (
+            f'<div style="margin:0 0 18px;line-height:1.45;">'
+            f'<span style="color:{colors["label"]};font-weight:800;">{emoji}{e(label)}:</span> '
+            f'<span style="color:{vc};font-weight:700;">{value}</span>'
             f'</div>'
         )
 
+    info_parts = []
+    rating = str(meta.get("imdb_rating") or "N/A")
+    info_parts.append(row("IMDb Rating", e(rating), colors["rating"], "👉 "))
+    info_parts.append(row("Movie Name", title))
+    if year:
+        info_parts.append(row("Release Year", str(year)))
+    if lang_known:
+        info_parts.append(row("Language", lang, colors["lang"]))
+    info_parts.append(row("Size", e(sizes)))
+    info_parts.append(row("Format", "MP4"))
+    info_parts.append(row("Runtime", e(fmt_runtime(dur))))
+    info_parts.append(row("Quality", e(qualities), colors["quality"]))
+    info_parts.append(row("Original Language", original_lang))
+    info_parts.append(row("Genres", genres))
+    info_parts.append(row("Frame Rate", e(f"{fps_txt} FPS")))
+
+    btn = (
+        "display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
+        "text-align:center;color:#fff;font-weight:800;font-size:19px;"
+        "text-decoration:none;cursor:pointer;border-radius:6px;"
+        "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
+        "box-shadow:0 8px 14px rgba(0,0,0,.45);"
+    )
+    head = (
+        "text-align:center;color:#fff;font-size:21px;line-height:1.4;"
+        "margin:28px 0 18px;font-weight:800"
+    )
+    hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.35);margin:24px 0"/>'
+
+    parts = []
+
+    # 1) 2:3 Google Image Search poster
+    parts.append(
+        f'<div style="text-align:center;margin:0 auto 18px;">'
+        f'<img src="{img_url(thumb_id)}" alt="{title}" '
+        f'width="360" style="display:block;width:360px;max-width:72%;height:auto;'
+        f'margin:0 auto;border-radius:8px;box-shadow:0 8px 22px rgba(0,0,0,.35);"/>'
+        f'</div>'
+    )
+
+    # 2) Title
+    parts.append(
+        f'<h2 style="text-align:center;color:{colors["heading"]};font-size:30px;'
+        f'line-height:1.3;margin:10px 0 28px;font-weight:800;">{title}</h2>'
+    )
+
+    # 3) Movie Info
+    parts.append(info_title)
+    parts.append(
+        f'<div style="font-size:21px;line-height:1.45;margin:0 auto 28px;max-width:100%;">'
+        + "".join(info_parts) +
+        '</div>'
+    )
+
+    # 4) VCDN player — immediately after Movie Info.
+    parts.append(
+        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+        f'margin:28px 0 18px;">Watch {title} Online</h3>'
+    )
+    embed_url = vcdn["embed_url"]
+    parts.append(
+        f'<div style="position:relative;width:100%;padding-top:56.25%;'
+        f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 28px">'
+        f'<iframe src="{e(embed_url, quote=True)}" '
+        'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
+        'frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" '
+        'allowfullscreen="true"></iframe>'
+        f'</div>'
+    )
+
+    # 5) Screenshots — no description/review/info between player and screenshots.
+    parts.append(
+        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+        f'margin:28px 0 18px;">Screenshots</h3>'
+    )
+    for fid in shot_ids:
+        parts.append(
+            f'<div style="width:100%;max-width:1920px;margin:0 auto 18px;line-height:0;'
+            f'padding:0;background:none;">'
+            f'<img src="{img_url(fid)}" alt="{title} screenshot" '
+            'style="display:block;width:100%;height:auto;max-width:1920px;margin:0;padding:0;'
+            'border:0;outline:0;box-shadow:none"/>'
+            f'</div>'
+        )
+
+    # 6) Download buttons — directly after screenshots. Nothing else in between.
     parts.append(hr)
-    parts.append(h3.format("Download Links"))
+    parts.append(
+        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+        f'margin:28px 0 18px;">Download Links</h3>'
+    )
     for h, fid, size in outputs:
         direct = (f"https://drive.usercontent.google.com/download?id={fid}"
                   "&amp;export=download&amp;confirm=t")
         parts.append(
-            f'<h4 style="{head}">{title}{ytxt}{lang_tag} '
-            f'{h}p x264 {fps_txt}fps [{human(size)}]</h4>')
+            f'<h4 style="{head}">{h}p x264 {fps_txt}fps '
+            f'[{human(size)}]</h4>'
+        )
         parts.append(
             f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
-            '&#11015;&#9889;DOWNLOAD NOW&#9889;&#11015;</a>')
+            '&#11015;&#9889; DOWNLOAD NOW &#9889;&#11015;</a>'
+        )
+
+    # 7) Description — intentionally AFTER all download buttons.
+    description = [e(p) for p in meta.get("description", []) if str(p).strip()]
+    if meta.get("tagline"):
+        parts.append(hr)
+        parts.append(
+            f'<p style="text-align:center;color:{colors["heading"]};font-size:20px;'
+            f'font-weight:700;margin:22px 0 14px;"><i>{e(meta["tagline"])}</i></p>'
+        )
+    if description:
+        parts.append(
+            f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+            f'margin:28px 0 18px;">Description</h3>'
+        )
+        for p in description:
+            parts.append(f'<p style="line-height:1.75;font-size:18px;">{p}</p>')
+
     parts.append(hr)
-    if meta["faq"]:
-        parts.append(h3.format(f"{title} - FAQ"))
-        for f in meta["faq"]:
-            parts.append(f"<h4>{e(str(f['q']))}</h4><p>{e(str(f['a']))}</p>")
-    parts.append('<h3 style="text-align:center;color:#f0a0ff">Winding Up &#10084;&#65039;</h3>')
     parts.append(TIMER_SCRIPT)
     return "\n".join(parts)
 
@@ -1418,7 +1501,7 @@ def process(video, processed_folder, output_folder):
     ytxt = f' ({meta["release_year"]})' if meta["release_year"] else ""
     ltxt = f' {meta["language"]}' if meta["language"].lower() != "unknown" else ""
     body = {"kind": "blogger#post",
-            "title": f'{meta["title"]}{ytxt}{ltxt} Movie - Watch Online & Download',
+            "title": f'{meta["title"]}{ytxt}{ltxt}',
             "content": content, "labels": labels}
     post = retry(lambda: blogger.posts().insert(
         blogId=BLOG_ID, body=body, isDraft=not PUBLISH).execute())
