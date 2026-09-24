@@ -6,6 +6,7 @@ Movie Bot: Drive video -> multi-resolution -> VCDN Watch Online
 Runs on GitHub Actions. All settings come from environment variables.
 """
 import hashlib
+import base64
 import html
 import http.client
 import json
@@ -600,6 +601,46 @@ def _make_scene_candidates(src, timestamps, base_crop, outdir):
     return files, (pw, ph, px, py)
 
 
+def _gemini_scene_select_rest(model, prompt, candidates):
+    """Call Gemini Scene Intelligence through REST, avoiding SDK AFC warnings."""
+    parts = [{"text": prompt}]
+    for idx, (_, p) in enumerate(candidates):
+        parts.append({"text": f"Candidate index: {idx}"})
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": base64.b64encode(p.read_bytes()).decode("ascii"),
+            }
+        })
+
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.1,
+        },
+    }
+
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + urllib.parse.quote(model, safe="")
+        + ":generateContent?key="
+        + urllib.parse.quote(GEMINI_KEY, safe="")
+    )
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "MovieBot/1.0",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
 def _ai_choose_scene_frames(candidates, count):
     if not candidates:
         return []
@@ -624,51 +665,95 @@ Return ONLY valid JSON:
 {{"selected":[0,1,2]}}
 """
 
-    parts = [types.Part.from_text(text=prompt)]
-    for idx, (_, p) in enumerate(candidates):
-        parts.append(types.Part.from_text(text=f"Candidate index: {idx}"))
-        parts.append(types.Part.from_bytes(
-            data=p.read_bytes(), mime_type="image/jpeg"
-        ))
+    # Scene selection does not need function calling or tools. Use the REST
+    # generateContent endpoint directly so the SDK's automatic-function-calling
+    # path is not involved. A temporary 503 should not kill the workflow.
+    scene_models = []
+    for model in [
+        os.environ.get("SCENE_GEMINI_MODEL", "gemini-3.5-flash"),
+        GEMINI_MODEL,
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+    ]:
+        if model and model not in scene_models:
+            scene_models.append(model)
 
-    for model in dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest"]):
-        try:
-            resp = retry(
-                lambda: gclient.models.generate_content(
-                    model=model,
-                    contents=parts,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    ),
-                ),
-                tries=2,
-            )
-            cleaned = re.sub(
-                r"^```(?:json)?\s*|\s*```$",
-                "",
-                resp.text.strip(),
-                flags=re.I
-            ).strip()
-            data = json.loads(cleaned)
+    for model in scene_models:
+        for attempt in range(1, 4):
+            try:
+                response = _gemini_scene_select_rest(model, prompt, candidates)
+                texts = []
+                for candidate in response.get("candidates") or []:
+                    for part in (candidate.get("content") or {}).get("parts") or []:
+                        if part.get("text"):
+                            texts.append(part["text"])
+                raw_text = "\n".join(texts).strip()
+                if not raw_text:
+                    raise RuntimeError("Gemini returned no scene-selection text.")
 
-            selected = []
-            for value in data.get("selected") or []:
+                cleaned = re.sub(
+                    r"^```(?:json)?\s*|\s*```$",
+                    "",
+                    raw_text,
+                    flags=re.I,
+                ).strip()
+                data = json.loads(cleaned)
+
+                selected = []
+                for value in data.get("selected") or []:
+                    try:
+                        idx = int(value)
+                        if 0 <= idx < len(candidates):
+                            selected.append(idx)
+                    except (TypeError, ValueError):
+                        pass
+
+                selected = list(dict.fromkeys(selected))
+                if selected:
+                    log(f"  AI selected scene frames ({model}): {selected[:wanted]}")
+                    return selected[:wanted]
+
+                raise RuntimeError("Gemini returned an empty/invalid selected list.")
+
+            except urllib.error.HTTPError as ex:
+                detail = ""
                 try:
-                    idx = int(value)
-                    if 0 <= idx < len(candidates):
-                        selected.append(idx)
-                except (TypeError, ValueError):
+                    detail = ex.read().decode("utf-8", "replace")[:500]
+                except Exception:
                     pass
+                if ex.code in (408, 429, 500, 502, 503, 504):
+                    if attempt < 3:
+                        wait = 2 ** attempt
+                        log(
+                            f"  Scene selection {model}: HTTP {ex.code}; "
+                            f"retrying in {wait}s ({attempt}/3)"
+                        )
+                        time.sleep(wait)
+                        continue
+                    log(f"  Scene selection {model}: HTTP {ex.code} after 3 attempts: {detail}")
+                else:
+                    log(f"  Scene selection {model}: HTTP {ex.code}: {detail}")
+                break
 
-            selected = list(dict.fromkeys(selected))
-            if selected:
-                log("  AI selected scene frames:", selected[:wanted])
-                return selected[:wanted]
+            except (urllib.error.URLError, TimeoutError) as ex:
+                if attempt < 3:
+                    wait = 2 ** attempt
+                    log(
+                        f"  Scene selection {model}: temporary network error; "
+                        f"retrying in {wait}s ({attempt}/3): {ex}"
+                    )
+                    time.sleep(wait)
+                    continue
+                log(f"  Scene selection {model}: network error after 3 attempts: {ex}")
+                break
 
-        except Exception as ex:
-            log(f"  Gemini scene selection failed ({model}): {ex}")
+            except Exception as ex:
+                log(f"  Gemini scene selection failed ({model}): {ex}")
+                break
 
-    # Deterministic fallback if Gemini scene selection fails.
+    # Deterministic fallback if Gemini scene selection is unavailable.
+    # The screenshot pipeline therefore continues even during a Gemini outage.
+    log("  Scene Intelligence: Gemini unavailable; using deterministic frame selection.")
     if len(candidates) <= wanted:
         return list(range(len(candidates)))
 
@@ -1119,6 +1204,57 @@ def clean_hint(filename):
     return no_year or t
 
 
+def _gemini_multimodal_json_rest(model, prompt, frames, audio_bytes=None):
+    """Gemini multimodal JSON call through REST; avoids SDK AFC warnings."""
+    parts = [{"text": prompt}]
+    for b in frames:
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": base64.b64encode(b).decode("ascii"),
+            }
+        })
+    if audio_bytes:
+        parts.append({
+            "inline_data": {
+                "mime_type": "audio/mp3",
+                "data": base64.b64encode(audio_bytes).decode("ascii"),
+            }
+        })
+
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.2,
+        },
+    }
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + urllib.parse.quote(model, safe="")
+        + ":generateContent?key="
+        + urllib.parse.quote(GEMINI_KEY, safe="")
+    )
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "MovieBot/1.0"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        response = json.loads(resp.read().decode("utf-8", "replace"))
+
+    texts = []
+    for candidate in response.get("candidates") or []:
+        for part in (candidate.get("content") or {}).get("parts") or []:
+            if part.get("text"):
+                texts.append(part["text"])
+    text = "\n".join(texts).strip()
+    if not text:
+        raise RuntimeError("Gemini returned no text.")
+    return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip())
+
+
 def analyze(filename_hint, frames, audio_bytes, site_labels):
     hint = clean_hint(filename_hint)
     year = find_year(filename_hint)
@@ -1154,19 +1290,45 @@ Return ONLY JSON with these keys:
   labels: pick 1-4 categories that best fit this film, ONLY from this exact list
           (copy spelling exactly): {json.dumps(site_labels)}.
           Judge by language spoken, film industry/country, and type. Ignore encoding/file-format labels."""
-    parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
-    parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
     data = {}
-    for model in dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest"]):
-        try:
-            resp = retry(lambda: gclient.models.generate_content(
-                model=model, contents=[prompt, *parts],
-                config=types.GenerateContentConfig(response_mime_type="application/json")), tries=2)
-            data = json.loads(re.sub(r"^```json|```$", "", resp.text.strip()).strip())
-            log("  Gemini model used:", model)
+    analysis_models = []
+    for model in [GEMINI_MODEL, os.environ.get("ANALYSIS_GEMINI_FALLBACK", "gemini-3.5-flash"), "gemini-2.5-flash"]:
+        if model and model not in analysis_models:
+            analysis_models.append(model)
+
+    for model in analysis_models:
+        for attempt in range(1, 4):
+            try:
+                data = _gemini_multimodal_json_rest(model, prompt, frames, audio_bytes)
+                log("  Gemini model used:", model)
+                break
+            except urllib.error.HTTPError as ex:
+                detail = ""
+                try:
+                    detail = ex.read().decode("utf-8", "replace")[:500]
+                except Exception:
+                    pass
+                if ex.code in (408, 429, 500, 502, 503, 504) and attempt < 3:
+                    wait = 2 ** attempt
+                    log(f"  Gemini analysis {model}: HTTP {ex.code}; retrying in {wait}s ({attempt}/3)")
+                    time.sleep(wait)
+                    continue
+                log(f"  Gemini analysis {model}: HTTP {ex.code}: {detail}")
+                break
+            except (urllib.error.URLError, TimeoutError) as ex:
+                if attempt < 3:
+                    wait = 2 ** attempt
+                    log(f"  Gemini analysis {model}: temporary network error; retrying in {wait}s ({attempt}/3)")
+                    time.sleep(wait)
+                    continue
+                log(f"  Gemini analysis {model}: network error after 3 attempts: {ex}")
+                break
+            except Exception as e:  # noqa
+                log(f"  Gemini model {model} failed: {e}")
+                break
+        if data:
             break
-        except Exception as e:  # noqa
-            log(f"  Gemini model {model} failed: {e}")
+
     if not data:
         log("  Using fallback text.")
 
@@ -1292,15 +1454,15 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     # while these inline colors make the Movie Info block visually similar to the
     # supplied reference image. The palette changes deterministically per post.
     info_title = (
-        f'<div style="text-align:center;margin:24px 0 22px;">'
-        f'<div style="font-size:34px;line-height:1.2;font-weight:800;'
+        f'<div style="text-align:center;margin:18px 0 16px;">'
+        f'<div style="font-size:26px;line-height:1.2;font-weight:800;'
         f'color:{colors["heading"]};">Movie Info</div></div>'
     )
 
     def row(label, value, value_color=None, emoji=""):
         vc = value_color or colors["value"]
         return (
-            f'<div style="margin:0 0 18px;line-height:1.45;">'
+            f'<div style="margin:0 0 9px;line-height:1.35;">'
             f'<span style="color:{colors["label"]};font-weight:800;">{emoji}{e(label)}:</span> '
             f'<span style="color:{vc};font-weight:700;">{value}</span>'
             f'</div>'
@@ -1323,15 +1485,15 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     info_parts.append(row("Frame Rate", e(f"{fps_txt} FPS")))
 
     btn = (
-        "display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
-        "text-align:center;color:#fff;font-weight:800;font-size:19px;"
+        "display:block;width:200px;max-width:82%;margin:0 auto 18px;padding:11px 8px;"
+        "text-align:center;color:#fff;font-weight:800;font-size:14px;"
         "text-decoration:none;cursor:pointer;border-radius:6px;"
         "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
         "box-shadow:0 8px 14px rgba(0,0,0,.45);"
     )
     head = (
-        "text-align:center;color:#fff;font-size:21px;line-height:1.4;"
-        "margin:28px 0 18px;font-weight:800"
+        "text-align:center;color:#fff;font-size:15px;line-height:1.3;"
+        "margin:16px 0 10px;font-weight:800"
     )
     hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.35);margin:24px 0"/>'
 
@@ -1348,21 +1510,21 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
 
     # 2) Title
     parts.append(
-        f'<h2 style="text-align:center;color:{colors["heading"]};font-size:30px;'
+        f'<h2 style="text-align:center;color:{colors["heading"]};font-size:24px;'
         f'line-height:1.3;margin:10px 0 28px;font-weight:800;">{title}</h2>'
     )
 
     # 3) Movie Info
     parts.append(info_title)
     parts.append(
-        f'<div style="font-size:21px;line-height:1.45;margin:0 auto 28px;max-width:100%;">'
+        f'<div style="font-size:16px;line-height:1.35;margin:0 auto 22px;max-width:100%;">'
         + "".join(info_parts) +
         '</div>'
     )
 
     # 4) VCDN player — immediately after Movie Info.
     parts.append(
-        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
         f'margin:28px 0 18px;">Watch {title} Online</h3>'
     )
     embed_url = vcdn["embed_url"]
@@ -1378,7 +1540,7 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
 
     # 5) Screenshots — no description/review/info between player and screenshots.
     parts.append(
-        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
         f'margin:28px 0 18px;">Screenshots</h3>'
     )
     for fid in shot_ids:
@@ -1394,7 +1556,7 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     # 6) Download buttons — directly after screenshots. Nothing else in between.
     parts.append(hr)
     parts.append(
-        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
         f'margin:28px 0 18px;">Download Links</h3>'
     )
     for h, fid, size in outputs:
@@ -1419,7 +1581,7 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
         )
     if description:
         parts.append(
-            f'<h3 style="text-align:center;color:{colors["heading"]};font-size:27px;'
+            f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
             f'margin:28px 0 18px;">Description</h3>'
         )
         for p in description:
