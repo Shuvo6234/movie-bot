@@ -18,10 +18,32 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install FFmpeg
+      - name: Restore Local AI cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin
+            ~/.cache/movie-bot/llama
+          key: movie-bot-local-ai-v2-${{ runner.os }}-x64-qwen3-vl-4b
+
+      - name: Prepare Local AI cache directories
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          mkdir -p "$HOME/.local/bin"
+          mkdir -p "$HOME/.cache/movie-bot/llama"
+
+          echo "Local AI cache status:"
+          du -sh "$HOME/.local/bin" 2>/dev/null || true
+          du -sh "$HOME/.cache/movie-bot/llama" 2>/dev/null || true
+
+      - name: Install FFmpeg if needed
+        run: |
+          if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+            echo "FFmpeg already available. Skipping apt install."
+          else
+            echo "FFmpeg not found. Installing..."
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
 
       - name: Install Python dependencies
         run: |
@@ -33,10 +55,24 @@ jobs:
             google-auth-httplib2 \
             google-auth-oauthlib
 
-      - name: Check FFmpeg
+      - name: Check FFmpeg and Local AI cache
         run: |
-          ffmpeg -version
-          ffprobe -version
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
+          echo ""
+          echo "llama binary cache:"
+          if [ -x "$HOME/.local/bin/llama" ]; then
+            "$HOME/.local/bin/llama" --version || true
+          elif [ -x "$HOME/.local/bin/llama-cli" ]; then
+            "$HOME/.local/bin/llama-cli" --version || true
+          else
+            echo "llama.cpp binary not cached yet. It will be installed only if Gemini fallback is needed."
+          fi
+
+          echo ""
+          echo "Qwen/Hugging Face cache:"
+          du -sh "$HOME/.cache/movie-bot/llama" 2>/dev/null || true
 
       - name: Run Movie Bot
         env:
@@ -60,5 +96,17 @@ jobs:
           WAIT_SECONDS: 20
           DIRECTOR_NAME: ""
 
+          LOCAL_AI_ENABLED: "true"
+          LOCAL_QWEN_MODEL: "Qwen/Qwen3-VL-4B-Instruct-GGUF:Q4_K_M"
+          LOCAL_AI_TIMEOUT: "900"
+          LOCAL_AI_CONTEXT: "8192"
+          LOCAL_AI_THREADS: "4"
+          LOCAL_AI_MAX_IMAGES: "12"
+
+          LLAMA_CACHE: /home/runner/.cache/movie-bot/llama
+          HF_HUB_CACHE: /home/runner/.cache/movie-bot/llama
+          HUGGINGFACE_HUB_CACHE: /home/runner/.cache/movie-bot/llama
+
         run: |
+          export PATH="$HOME/.local/bin:$PATH"
           python bot.py
