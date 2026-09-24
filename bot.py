@@ -765,19 +765,256 @@ def make_screenshots(src, dur, w, h, outdir):
 
 
 
-def make_thumbnail(src, dur, w, h, outdir):
-    """9:16 portrait thumbnail, 720x1280, centre crop from a frame at 35%."""
-    if w * 16 >= h * 9:
-        ch = h // 2 * 2
-        cw = int(h * 9 / 16) // 2 * 2
-    else:
-        cw = w // 2 * 2
-        ch = int(w * 16 / 9) // 2 * 2
-    p = str(outdir / "thumb_9x16.jpg")
-    run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{dur * 0.35:.2f}", "-i", src,
-         "-frames:v", "1", "-vf", f"crop={cw}:{ch},scale=720:1280", "-q:v", "2", p])
-    return p
+def _gemini_google_image_search(query, outdir):
+    """
+    Use Gemini's Google Search grounding with image_search enabled to find
+    a real web image for the movie poster/thumbnail.
+    Returns a list of candidate image URLs.
+    """
+    prompt = f"""Search Google Images for the movie/film poster for:
+"{query}"
 
+Find the most relevant official or professionally published poster/cover.
+Prefer a clean portrait movie poster, ideally close to 2:3 ratio.
+Avoid fan edits, screenshots, social-media collages, unrelated films,
+logos-only images, and images with large watermarks.
+
+Use image search. Return only a short JSON object:
+{{"query":"{query}"}}.
+Do not invent image URLs; the application will read the image-search results.
+"""
+
+    candidates = []
+
+    for model in dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest"]):
+        try:
+            payload = {
+                "contents": [
+                    {"parts": [{"text": prompt}]}
+                ],
+                "tools": [
+                    {
+                        "google_search": {
+                            "search_types": {
+                                "image_search": {}
+                            }
+                        }
+                    }
+                ],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "temperature": 0.1,
+                },
+            }
+
+            endpoint = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                + urllib.parse.quote(model, safe="")
+                + ":generateContent?key="
+                + urllib.parse.quote(GEMINI_KEY, safe="")
+            )
+
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "MovieBot/1.0",
+                },
+                method="POST",
+            )
+
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+
+            # REST response uses camelCase. Accept snake_case too so the
+            # function remains tolerant of SDK/proxy transformations.
+            candidates_json = data.get("candidates") or []
+            for candidate in candidates_json:
+                gm = (
+                    candidate.get("groundingMetadata")
+                    or candidate.get("grounding_metadata")
+                    or {}
+                )
+                chunks = (
+                    gm.get("groundingChunks")
+                    or gm.get("grounding_chunks")
+                    or []
+                )
+
+                for chunk in chunks:
+                    image = chunk.get("image") or {}
+                    image_uri = (
+                        image.get("imageUri")
+                        or image.get("image_uri")
+                    )
+                    if image_uri:
+                        candidates.append(image_uri)
+
+                # If the model happened to return a URL in text, keep it as
+                # a secondary candidate; grounding image URLs remain preferred.
+                for part in (candidate.get("content") or {}).get("parts") or []:
+                    value = part.get("text") or ""
+                    for url in re.findall(r"https?://[^\s\"'<>]+", value):
+                        candidates.append(url.rstrip(".,)"))
+
+            candidates = list(dict.fromkeys(candidates))
+            if candidates:
+                log(f"  Google Image Search found {len(candidates)} image candidate(s)")
+                return candidates[:8]
+
+            log(f"  Gemini Google Image Search returned no image candidates ({model})")
+
+        except Exception as ex:
+            log(f"  Gemini Google Image Search failed ({model}): {ex}")
+
+    return []
+
+
+def _download_web_image(url, path):
+    """Download one image-search result without loading an entire movie."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        },
+    )
+
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        data = resp.read()
+
+    if len(data) < 2048:
+        raise RuntimeError("Downloaded image is too small.")
+
+    Path(path).write_bytes(data)
+
+
+def _make_2x3_thumbnail_from_image(src_image, out_path):
+    """
+    Convert a web poster to a clean 2:3 portrait thumbnail.
+    No 9:16 crop and no artificial black borders.
+    """
+    probe_json = subprocess.check_output([
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "json", str(src_image)
+    ])
+    info = json.loads(probe_json)
+    stream = info["streams"][0]
+    iw = int(stream["width"])
+    ih = int(stream["height"])
+
+    if iw <= 0 or ih <= 0:
+        raise RuntimeError("Invalid downloaded image dimensions.")
+
+    # Target poster ratio = 2:3, matching the reference-style movie cards.
+    if iw / ih > 2 / 3:
+        ch = ih
+        cw = int(ih * 2 / 3)
+        cx = (iw - cw) // 2
+        cy = 0
+    else:
+        cw = iw
+        ch = int(iw * 3 / 2)
+        cx = 0
+        cy = (ih - ch) // 2
+
+    cw = max(2, (cw // 2) * 2)
+    ch = max(2, (ch // 2) * 2)
+    cx = max(0, min(cx, iw - cw))
+    cy = max(0, min(cy, ih - ch))
+
+    # 720x1080 = exact 2:3. This is intentionally NOT 9:16.
+    run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(src_image),
+        "-vf",
+        f"crop={cw}:{ch}:{cx}:{cy},scale=720:1080:flags=lanczos,setsar=1",
+        "-frames:v", "1",
+        "-q:v", "1",
+        "-pix_fmt", "yuvj420p",
+        str(out_path),
+    ])
+
+    return str(out_path)
+
+
+def make_thumbnail(src, dur, w, h, outdir, movie_title="", filename_hint=""):
+    """
+    Google-search poster thumbnail.
+
+    Priority:
+      1. Gemini + Google Image Search result
+      2. If search/download fails, create a 2:3 thumbnail from the source
+
+    The final image is always 2:3 (720x1080), never 9:16.
+    """
+    title = str(movie_title or "").strip()
+    hint = clean_hint(filename_hint) if filename_hint else ""
+    query = title or hint or "movie poster"
+    if hint and title and hint.lower() not in title.lower():
+        query = f"{title} {hint}"
+
+    raw_dir = outdir / "web_thumbnail_candidates"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    image_urls = _gemini_google_image_search(
+        f"{query} official movie poster",
+        raw_dir
+    )
+
+    for i, image_url in enumerate(image_urls, 1):
+        raw_path = raw_dir / f"poster_{i}.source"
+        final_path = outdir / "thumb_2x3.jpg"
+
+        try:
+            log(f"  Trying Google image poster {i}/{len(image_urls)}")
+            _download_web_image(image_url, raw_path)
+            _make_2x3_thumbnail_from_image(raw_path, final_path)
+
+            if final_path.exists() and final_path.stat().st_size > 10_000:
+                log("  Thumbnail source: Google Image Search")
+                log("  Thumbnail size: 720x1080 (2:3)")
+                return str(final_path)
+
+        except Exception as ex:
+            log(f"  Google poster candidate {i} failed: {ex}")
+            try:
+                raw_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    # Safe fallback: still use the requested reference-style 2:3 ratio,
+    # but never revert to the old 9:16 thumbnail.
+    log("  Google poster unavailable; using source-frame 2:3 fallback.")
+
+    if w / h > 2 / 3:
+        ch = h
+        cw = int(h * 2 / 3)
+    else:
+        cw = w
+        ch = int(w * 3 / 2)
+
+    cw = max(2, (cw // 2) * 2)
+    ch = max(2, (ch // 2) * 2)
+
+    p = str(outdir / "thumb_2x3.jpg")
+    run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-ss", f"{dur * 0.35:.2f}",
+        "-i", src,
+        "-frames:v", "1",
+        "-vf", f"crop={cw}:{ch},scale=720:1080:flags=lanczos,setsar=1",
+        "-q:v", "1",
+        "-pix_fmt", "yuvj420p",
+        p
+    ])
+    return p
 
 def analysis_inputs(src, dur, outdir):
     frames = []
@@ -1125,9 +1362,8 @@ def process(video, processed_folder, output_folder):
     short = min(w, h)
     log(f"Duration {dur / 60:.1f} min, {w}x{h}, {fps:.2f} fps")
 
-    log("Making screenshots and thumbnail...")
+    log("Making AI-selected screenshots...")
     shots = make_screenshots(src, dur, w, h, job)
-    thumb = make_thumbnail(src, dur, w, h, job)
 
     log("Analysing with Gemini...")
     site_labels = get_site_labels()
@@ -1135,6 +1371,13 @@ def process(video, processed_folder, output_folder):
     meta = analyze(name, frames, audio, site_labels)
     log("  Title:", meta["title"])
     log("  Labels:", meta["labels"])
+
+    log("Searching Google Images for movie poster thumbnail...")
+    thumb = make_thumbnail(
+        src, dur, w, h, job,
+        movie_title=meta["title"],
+        filename_hint=name,
+    )
 
     targets = sorted({t for t in RESOLUTIONS if t <= short * 1.05}) or [short]
     outputs = []
