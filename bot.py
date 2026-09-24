@@ -782,8 +782,10 @@ Release year from filename: {year or 'Unknown'}
 
 Use ONLY what is visible in the supplied movie frames plus the filename hint. Do not invent cast,
 crew, awards, ratings, box office, exact plot facts, or IMDb information.
+For the title, first read any visible movie title/title card and use it; if the filename clearly contains
+the real title, clean it and preserve it. Invent a title only when no real title can reasonably be identified.
 Return ONLY valid JSON with:
-title: clean 1-6 word film title
+title: clean 1-6 word film title, preferably the actual visible/filename title
 tagline: one short sentence, max 18 words
 description: 1-2 short spoiler-light paragraphs, about 80-140 words total
 language: display language(s) if reasonably identifiable, otherwise the language hint or Unknown
@@ -828,7 +830,6 @@ Return ONLY valid JSON:
         os.environ.get("SCENE_GEMINI_MODEL", "gemini-3.5-flash"),
         GEMINI_MODEL,
         "gemini-3.5-flash",
-        "gemini-2.5-flash",
     ]:
         if model and model not in scene_models:
             scene_models.append(model)
@@ -1552,6 +1553,30 @@ IMPORTANT:
     return "N/A"
 
 
+def normalize_movie_title(value, fallback=""):
+    """Keep the Blogger title short, clean and poster-like.
+
+    The AI may occasionally add marketing words even when asked not to.
+    Strip only obvious metadata/marketing suffixes; do not rewrite genuine
+    movie names.
+    """
+    text = html.unescape(str(value or "")).strip()
+    text = text.strip('\"\'`“”‘’')
+    text = YEAR_RE.sub(" ", text)
+    text = re.sub(
+        r"\s*(?:[-|:–—]\s*)?(?:full\s+movie|movie\s+full|watch\s+online|online\s+watch|download|official\s+trailer|trailer)\s*$",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\s+", " ", text).strip(" -|:–—")
+
+    if not text or text.lower() in {"untitled", "untitled film", "movie", "film"}:
+        text = clean_hint(fallback) if fallback else "Untitled Film"
+
+    return text[:120].strip()
+
+
 def analyze(filename_hint, frames, audio_bytes, site_labels):
     hint = clean_hint(filename_hint)
     year = find_year(filename_hint)
@@ -1564,8 +1589,10 @@ Rules:
 - Write everything in your own words, in natural English. Never copy text from any website, film or review.
 - Base movie facts ONLY on what you can actually see/hear and the filename hint. If uncertain, use a safe general value.
 - Do not invent cast, crew, awards, festivals, box office, IMDb pages, or exact plot facts.
-- If the filename looks like a genuine movie title, preserve that title when reasonably confident; otherwise create a clean cinematic title from the film content.
-- Title must be 1-6 words, with no hashtags, emojis, year, "trending reels", "watch online" or "download".
+- Identify the actual film title whenever it is visible in a frame/title card or clearly present in the filename.
+- If a genuine title is visible, preserve it exactly apart from normal capitalization/spacing. Do NOT invent a different title.
+- If the filename is messy but contains a recognizable title, clean the filename into that title. Only invent a title when no real title can be reasonably identified.
+- Title must be 1-6 words, with no hashtags, emojis, year, "trending reels", "watch online", "download", "full movie", "official trailer", or quality/file-size text.
 - The website description must be concise and spoiler-light: 1-2 short paragraphs, about 80-140 words total.
 - Language should list the languages actually evident from the audio/filename when possible, for example "Hindi - English".
 - Original language should be the primary/original spoken language when reasonably identifiable; otherwise "Unknown".
@@ -1588,7 +1615,7 @@ Return ONLY JSON with these keys:
           Judge by language spoken, film industry/country, and type. Ignore encoding/file-format labels."""
     data = {}
     analysis_models = []
-    for model in [GEMINI_MODEL, os.environ.get("ANALYSIS_GEMINI_FALLBACK", "gemini-3.5-flash"), "gemini-2.5-flash"]:
+    for model in [GEMINI_MODEL, os.environ.get("ANALYSIS_GEMINI_FALLBACK", "gemini-3.5-flash")]:
         if model and model not in analysis_models:
             analysis_models.append(model)
 
@@ -1650,7 +1677,7 @@ Return ONLY JSON with these keys:
         desc = ["An original film."]
 
     faq = [f for f in (data.get("faq") or []) if isinstance(f, dict) and f.get("q") and f.get("a")]
-    final_title = str(data.get("title") or hint or "Untitled Film").strip()
+    final_title = normalize_movie_title(data.get("title"), filename_hint)
     # IMDb is checked separately using official IMDb search grounding.
     imdb_rating = _gemini_imdb_lookup(final_title, year, data.get("language") or LANGUAGE_HINT)
     return {
@@ -1764,54 +1791,62 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     sizes = " - ".join(human(s) for _, _, s in outputs)
     colors = _post_colors(raw_title)
 
-    # Movie Info layout copied from bot-9.py, while keeping the current
-    # verified IMDb rating system.
-    info_title = (
-        f'<h3 style="text-align:center;color:{colors["heading"]};'
-        f'font-size:22px;line-height:1.4;margin:28px 0 18px;font-weight:800">'
-        'Movie Info</h3>'
-    )
-
-    info = []
+    # Premium compact Movie Info card.
+    # Keep the reference-style fields, but remove the excessive vertical gaps.
     rating = str(meta.get("imdb_rating") or "N/A")
-    info.append(
-        f'<div><span style="color:{colors["rating"]};font-weight:800;">'
-        f'👉 IMDb Rating:-</span> '
-        f'<span style="color:{colors["value"]};font-weight:700;">{e(rating)}</span></div>'
-    )
-    info.append(
-        f'<div><b style="color:{colors["label"]};">Movie Name:</b> '
-        f'<span style="color:{colors["value"]};">{title}</span></div>'
-    )
-    if year:
-        info.append(
-            f'<div><b style="color:{colors["label"]};">Release Year:</b> '
-            f'<span style="color:{colors["value"]};">{year}</span></div>'
+
+    def chip(text, accent):
+        return (
+            f'<span style="display:inline-block;padding:3px 8px;margin:2px 4px 2px 0;'
+            f'border-radius:999px;border:1px solid {accent}66;background:{accent}18;'
+            f'color:{accent};font-weight:800;font-size:12px;line-height:1.2;">{e(text)}</span>'
         )
-    if DIRECTOR_NAME:
-        info.append(
-            f'<div><b style="color:{colors["label"]};">Directed by:</b> '
-            f'<span style="color:{colors["value"]};">{e(DIRECTOR_NAME)}</span></div>'
+
+    quality_chips = "".join(chip(f"{h}p", colors["quality"]) for h, _, _ in outputs) or chip("N/A", colors["quality"])
+    size_chips = "".join(chip(human(s), colors["value"]) for _, _, s in outputs) or chip("N/A", colors["value"])
+
+    def info_item(label, value, accent=None, full=False):
+        value_color = accent or colors["value"]
+        width = "100%" if full else "50%"
+        return (
+            f'<div style="box-sizing:border-box;width:{width};padding:5px 8px;min-width:0;">'
+            f'<div style="font-size:11px;line-height:1.15;text-transform:uppercase;letter-spacing:.45px;'
+            f'color:{colors["label"]};opacity:.72;margin-bottom:3px;">{e(label)}</div>'
+            f'<div style="font-size:14px;line-height:1.35;color:{value_color};font-weight:700;overflow-wrap:anywhere;">{value}</div>'
+            f'</div>'
         )
-    if lang_known:
-        info.append(
-            f'<div><b style="color:{colors["label"]};">Language:</b> '
-            f'<span style="color:{colors["lang"]};">{lang}</span></div>'
-        )
-    info += [
-        f'<div><b style="color:{colors["label"]};">Runtime:</b> '
-        f'<span style="color:{colors["value"]};">{fmt_runtime(dur)}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Genres:</b> '
-        f'<span style="color:{colors["value"]};">{genres}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Content Advisory:</b> '
-        f'<span style="color:{colors["value"]};">{e(meta["content_rating"])}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Quality:</b> '
-        f'<span style="color:{colors["quality"]};">{qualities}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Frame Rate:</b> '
-        f'<span style="color:{colors["value"]};">{fps_txt}fps</span></div>',
-        f'<div><b style="color:{colors["label"]};">Size:</b> '
-        f'<span style="color:{colors["value"]};">{sizes}</span></div>',
+
+    info_cells = [
+        info_item("IMDb Rating", f'<span style="color:{colors["rating"]};">★ {e(rating)}</span>'),
+        info_item("Movie Name", title),
     ]
+    if year:
+        info_cells.append(info_item("Release Year", str(year)))
+    if DIRECTOR_NAME:
+        info_cells.append(info_item("Directed by", e(DIRECTOR_NAME)))
+    if lang_known:
+        info_cells.append(info_item("Language", lang, colors["lang"]))
+    info_cells.append(info_item("Original Language", original_lang))
+    info_cells.append(info_item("Runtime", fmt_runtime(dur)))
+    info_cells.append(info_item("Genres", genres))
+    info_cells.append(info_item("Content Advisory", e(meta["content_rating"])))
+    info_cells.append(info_item("Frame Rate", f"{e(fps_txt)} fps"))
+    info_cells.append(info_item("Quality", quality_chips, colors["quality"], full=True))
+    info_cells.append(info_item("Size", size_chips, colors["value"], full=True))
+
+    info_title = (
+        f'<div style="text-align:center;color:{colors["heading"]};font-size:20px;line-height:1.2;'
+        f'margin:18px 0 10px;font-weight:900;letter-spacing:.2px;">Movie Info</div>'
+    )
+    info_card = (
+        f'<div style="width:100%;box-sizing:border-box;margin:0 auto 22px;padding:7px 4px;'
+        f'border:1px solid rgba(255,255,255,.13);border-radius:12px;'
+        f'background:linear-gradient(145deg,rgba(255,255,255,.075),rgba(255,255,255,.025));'
+        f'box-shadow:0 7px 22px rgba(0,0,0,.24);">'
+        f'<div style="display:flex;flex-wrap:wrap;align-items:stretch;">'
+        + "".join(info_cells) +
+        f'</div></div>'
+    )
 
     btn = (
         "display:block;width:200px;max-width:82%;margin:0 auto 18px;padding:11px 8px;"
@@ -1846,11 +1881,7 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     # 3) Movie Info — same field structure/style as bot-9.py, with the
     # current verified IMDb rating added at the top.
     parts.append(info_title)
-    parts.append(
-        '<p style="font-size:16px;line-height:1.55;margin:0 0 22px;">'
-        + "<br/>".join(info) +
-        '</p>'
-    )
+    parts.append(info_card)
 
     # 4) VCDN player — immediately after Movie Info.
     parts.append(
