@@ -1,19 +1,15 @@
 
 """
 Movie Bot: Drive video -> multi-resolution -> VCDN Watch Online
-+ Google Drive downloads + screenshots + 2:3 Google Image poster thumbnail
++ Google Drive downloads + screenshots + 9:16 thumbnail
 -> Gemini title/description/labels -> Blogger post (draft by default).
 Runs on GitHub Actions. All settings come from environment variables.
 """
-import hashlib
-import difflib
-import base64
 import html
 import http.client
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -54,20 +50,6 @@ SCREENSHOTS = int(os.environ.get("SCREENSHOTS", "6"))
 WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "20"))
 DIRECTOR_NAME = os.environ.get("DIRECTOR_NAME", "").strip()
 CRF = {480: 24, 720: 23, 1080: 22, 1440: 22, 2160: 21}
-
-# ---------- local AI fallback ----------
-# Gemini remains the primary AI. Qwen3-VL is started ONLY when a Gemini
-# task has failed completely. The local model runs through llama.cpp so no
-# external AI API/file upload is needed for the fallback.
-LOCAL_AI_ENABLED = os.environ.get("LOCAL_AI_ENABLED", "true").lower() == "true"
-LOCAL_QWEN_MODEL = os.environ.get(
-    "LOCAL_QWEN_MODEL", "Qwen/Qwen3-VL-4B-Instruct-GGUF:Q4_K_M"
-)
-LOCAL_AI_TIMEOUT = int(os.environ.get("LOCAL_AI_TIMEOUT", "900"))
-LOCAL_AI_CONTEXT = int(os.environ.get("LOCAL_AI_CONTEXT", "8192"))
-LOCAL_AI_THREADS = int(os.environ.get("LOCAL_AI_THREADS", "4"))
-LOCAL_AI_MAX_IMAGES = int(os.environ.get("LOCAL_AI_MAX_IMAGES", "12"))
-
 
 WORK = Path("work")
 SCOPES = [
@@ -483,788 +465,91 @@ def probe(path):
     return float(d["format"]["duration"]), int(st["width"]), int(st["height"]), fps
 
 
-# ---------- AI Scene Intelligence screenshots ----------
-def _scene_timestamps(src, dur):
-    candidates = []
-    vf = "fps=2,select='gt(scene,0.28)',showinfo"
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "info", "-i", src,
-             "-vf", vf, "-an", "-f", "null", "-"],
-            capture_output=True, text=True, check=True
-        )
-        raw = (proc.stderr or "") + (proc.stdout or "")
-        for m in re.finditer(r"pts_time:([0-9]+(?:\.[0-9]+)?)", raw):
-            t = float(m.group(1))
-            if 2.0 < t < max(2.0, dur - 2.0):
-                candidates.append(t)
-    except Exception as ex:
-        log("  Scene detection failed:", ex)
-
-    candidates = sorted(set(round(x, 2) for x in candidates))
-    spaced = []
-    min_gap = max(4.0, dur / 80.0)
-    for t in candidates:
-        if not spaced or t - spaced[-1] >= min_gap:
-            spaced.append(t)
-
-    fallback = [
-        dur * i / 16.0
-        for i in range(1, 16)
-        if 2.0 < dur * i / 16.0 < dur - 2.0
-    ]
-    merged = sorted(set(spaced + [round(x, 2) for x in fallback]))
-
-    if len(merged) > 36:
-        selected = []
-        step = (len(merged) - 1) / 35
-        for i in range(36):
-            selected.append(merged[round(i * step)])
-        merged = sorted(set(selected))
-
-    log(f"  Scene Intelligence: {len(merged)} candidate timestamps")
-    return merged
-
-
-def _detect_crop(src, dur, w, h):
-    crops = []
-    for t in [dur * 0.20, dur * 0.40, dur * 0.60, dur * 0.80]:
-        try:
-            proc = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "info",
-                 "-ss", f"{t:.3f}", "-i", src,
-                 "-frames:v", "1",
-                 "-vf", "cropdetect=limit=24:round=2:reset=0",
-                 "-f", "null", "-"],
-                capture_output=True, text=True, check=True
-            )
-            raw = (proc.stderr or "") + (proc.stdout or "")
-            matches = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", raw)
-            if matches:
-                cw, ch, cx, cy = map(int, matches[-1])
-                if cw >= int(w * 0.70) and ch >= int(h * 0.70):
-                    crops.append((cw, ch, cx, cy))
-        except Exception as ex:
-            log("  cropdetect sample skipped:", ex)
-
-    if not crops:
-        return w, h, 0, 0
-
-    from collections import Counter
-    best, count = Counter(crops).most_common(1)[0]
-
-    if count >= 2:
-        log(f"  Black-bar detection: crop={best[0]}:{best[1]}:{best[2]}:{best[3]} "
-            f"({count}/{len(crops)} samples)")
-        return best
-
-    cw, ch, cx, cy = crops[0]
-    if cw < w * 0.98 or ch < h * 0.98:
-        log(f"  Black-bar detection: crop={cw}:{ch}:{cx}:{cy}")
-        return crops[0]
-
-    return w, h, 0, 0
-
-
-def _make_scene_candidates(src, timestamps, base_crop, outdir):
-    candidate_dir = outdir / "scene_candidates"
-    candidate_dir.mkdir(parents=True, exist_ok=True)
-
-    bw, bh, bx, by = base_crop
-    ratio = bw / bh if bh else 16 / 9
-
-    if ratio > 16 / 9:
-        pw = int(bh * 16 / 9)
-        ph = bh
-        px = bx + (bw - pw) // 2
-        py = by
-    elif ratio < 16 / 9:
-        pw = bw
-        ph = int(bw * 9 / 16)
-        px = bx
-        py = by + (bh - ph) // 2
-    else:
-        pw, ph, px, py = bw, bh, bx, by
-
-    # Keep crop strictly inside the source frame.
-    pw = min(pw, w := max(2, bw))
-    ph = min(ph, h := max(2, bh))
-    px = max(bx, min(int(px), bx + bw - pw))
-    py = max(by, min(int(py), by + bh - ph))
-
-    pw = max(2, (pw // 2) * 2)
-    ph = max(2, (ph // 2) * 2)
-
-    files = []
-    for i, t in enumerate(timestamps):
-        p = candidate_dir / f"candidate_{i:02d}.jpg"
-        vf = f"crop={pw}:{ph}:{px}:{py},scale=768:432:flags=lanczos,setsar=1"
-        try:
-            run([
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", src,
-                "-ss", f"{t:.3f}",
-                "-frames:v", "1",
-                "-vf", vf,
-                "-q:v", "3",
-                "-pix_fmt", "yuvj420p",
-                str(p),
-            ])
-            files.append((t, p))
-        except Exception as ex:
-            log(f"  Candidate frame {i} failed:", ex)
-
-    return files, (pw, ph, px, py)
-
-
-def _gemini_scene_select_rest(model, prompt, candidates):
-    """Call Gemini Scene Intelligence through REST, avoiding SDK AFC warnings."""
-    parts = [{"text": prompt}]
-    for idx, (_, p) in enumerate(candidates):
-        parts.append({"text": f"Candidate index: {idx}"})
-        parts.append({
-            "inline_data": {
-                "mime_type": "image/jpeg",
-                "data": base64.b64encode(p.read_bytes()).decode("ascii"),
-            }
-        })
-
-    payload = {
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.1,
-        },
-    }
-
-    endpoint = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + urllib.parse.quote(model, safe="")
-        + ":generateContent?key="
-        + urllib.parse.quote(GEMINI_KEY, safe="")
-    )
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "MovieBot/1.0",
-        },
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
-
-
-def _ensure_local_qwen():
-    """Return the local llama command, installing llama.cpp only if needed."""
-    if not LOCAL_AI_ENABLED:
-        raise RuntimeError("Local AI fallback is disabled (LOCAL_AI_ENABLED=false).")
-
-    for cmd in ("llama", "llama-cli"):
-        if shutil.which(cmd):
-            return cmd
-
-    log("  Local AI: llama.cpp not found; installing the official llama binary...")
-    install_script = "https://llama.app/install.sh"
-    proc = subprocess.run(
-        ["bash", "-lc", f"curl -LsSf {shlex.quote(install_script)} | sh"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=300,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"llama.cpp installation failed: {proc.stdout[-2000:]}")
-
-    local_bin = str(Path.home() / ".local" / "bin")
-    os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
-    for cmd in ("llama", "llama-cli"):
-        if shutil.which(cmd):
-            return cmd
-
-    raise RuntimeError("llama.cpp installed but no llama executable was found.")
-
-
-def _local_qwen_json(prompt, image_paths=None, max_tokens=700):
-    """Run Qwen3-VL locally and parse its JSON response."""
-    cmd = _ensure_local_qwen()
-    image_paths = [str(x) for x in (image_paths or [])][:LOCAL_AI_MAX_IMAGES]
-    if not image_paths:
-        raise RuntimeError("Qwen fallback requires at least one image.")
-
-    image_arg = ",".join(image_paths)
-    if cmd == "llama":
-        executable = [cmd, "cli"]
-    else:
-        executable = [cmd]
-
-    args = executable + [
-        "-hf", LOCAL_QWEN_MODEL,
-        "--image", image_arg,
-        "-p", prompt,
-        "-c", str(LOCAL_AI_CONTEXT),
-        "-n", str(max_tokens),
-        "-t", str(LOCAL_AI_THREADS),
-        "--temperature", "0.1",
-        "--reasoning", "off",
-        "--simple-io",
-        "--single-turn",
-        "--no-warmup",
-    ]
-
-    log("  Local AI: running Qwen3-VL fallback...")
-    proc = subprocess.run(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=LOCAL_AI_TIMEOUT,
-    )
-    raw = proc.stdout or ""
-    if proc.returncode != 0:
-        raise RuntimeError(f"Qwen3-VL exited with code {proc.returncode}: {raw[-2500:]}")
-
-    # llama.cpp may print status/timing lines around the model response.
-    candidates = re.findall(r"\{.*\}", raw, flags=re.S)
-    for candidate in reversed(candidates):
-        cleaned = candidate.strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            continue
-
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I).strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as ex:
-        raise RuntimeError(f"Qwen3-VL returned invalid JSON: {raw[-3000:]}") from ex
-
-
-def _local_qwen_scene_select(candidates, count):
-    """Select screenshot indexes with Qwen3-VL after Gemini scene selection fails."""
-    if not candidates:
-        return []
-    wanted = min(count, len(candidates))
-    prompt = f"""You are selecting screenshots for an original film website.
-Choose exactly {wanted} candidate frame indexes.
-Prefer sharp, cinematic, well-lit frames with people, emotion, action, scenery, or strong composition.
-Avoid black frames, blur, credits, logos, title cards, empty frames, and near-duplicates.
-Spread choices across the movie when possible.
-Return ONLY JSON: {{\"selected\":[0,1,2]}}"""
-    paths = [p for _, p in candidates]
-    data = _local_qwen_json(prompt, paths, max_tokens=200)
-    selected = []
-    for value in data.get("selected") or []:
-        try:
-            idx = int(value)
-            if 0 <= idx < len(candidates):
-                selected.append(idx)
-        except (TypeError, ValueError):
-            pass
-    selected = list(dict.fromkeys(selected))
-    if not selected:
-        raise RuntimeError("Qwen3-VL returned no valid screenshot indexes.")
-    return selected[:wanted]
-
-
-def _local_qwen_analyze(filename_hint, frame_paths, site_labels):
-    """Metadata fallback. It intentionally uses frames only; Qwen3-VL is vision-first."""
-    hint = clean_hint(filename_hint)
-    year = find_year(filename_hint)
-    prompt = f"""You are the backup metadata editor for an ORIGINAL movie blog.
-Gemini failed, so you must complete the metadata task locally.
-Filename hint: {hint}
-Language hint: {LANGUAGE_HINT}
-Director: {DIRECTOR_NAME}
-Release year from filename: {year or 'Unknown'}
-
-Use ONLY what is visible in the supplied movie frames plus the filename hint. Do not invent cast,
-crew, awards, ratings, box office, exact plot facts, or IMDb information.
-Return ONLY valid JSON with:
-title: clean 1-6 word film title
-tagline: one short sentence, max 18 words
-description: 1-2 short spoiler-light paragraphs, about 80-140 words total
-language: display language(s) if reasonably identifiable, otherwise the language hint or Unknown
-original_language: main/original language if reasonably identifiable, otherwise Unknown
-genres: 1-3 genres
-content_rating: General audience, Teen and above, or Mature audience
-tags: up to 6 short keywords
-labels: pick 1-4 values ONLY from this exact list: {json.dumps(site_labels)}
-Do not use piracy terms such as leaked, HD print, free download full movie, WEB-DL, dual audio, or 300mb."""
-    return _local_qwen_json(prompt, frame_paths, max_tokens=700)
-
-
-def _ai_choose_scene_frames(candidates, count):
-    if not candidates:
-        return []
-
-    candidates = candidates[:36]
-    wanted = min(count, len(candidates))
-
-    prompt = f"""You are selecting screenshots for an ORIGINAL film website.
-
-Choose exactly {wanted} of the supplied candidate frames.
-
-Selection rules:
-- Prefer sharp, cinematic, visually interesting and well-lit frames.
-- Prefer strong characters, environments, action, emotion, or composition.
-- Avoid black frames, blurry frames, transitional frames, credits, logos,
-  title cards, empty shots, and frames dominated by darkness.
-- Avoid near-duplicate frames.
-- Spread selections across different parts of the movie when possible.
-- Do not infer or invent plot facts.
-
-Return ONLY valid JSON:
-{{"selected":[0,1,2]}}
-"""
-
-    # Scene selection does not need function calling or tools. Use the REST
-    # generateContent endpoint directly so the SDK's automatic-function-calling
-    # path is not involved. A temporary 503 should not kill the workflow.
-    scene_models = []
-    for model in [
-        os.environ.get("SCENE_GEMINI_MODEL", "gemini-3.5-flash"),
-        GEMINI_MODEL,
-        "gemini-3.5-flash",
-        "gemini-2.5-flash",
-    ]:
-        if model and model not in scene_models:
-            scene_models.append(model)
-
-    for model in scene_models:
-        for attempt in range(1, 4):
-            try:
-                response = _gemini_scene_select_rest(model, prompt, candidates)
-                texts = []
-                for candidate in response.get("candidates") or []:
-                    for part in (candidate.get("content") or {}).get("parts") or []:
-                        if part.get("text"):
-                            texts.append(part["text"])
-                raw_text = "\n".join(texts).strip()
-                if not raw_text:
-                    raise RuntimeError("Gemini returned no scene-selection text.")
-
-                cleaned = re.sub(
-                    r"^```(?:json)?\s*|\s*```$",
-                    "",
-                    raw_text,
-                    flags=re.I,
-                ).strip()
-                data = json.loads(cleaned)
-
-                selected = []
-                for value in data.get("selected") or []:
-                    try:
-                        idx = int(value)
-                        if 0 <= idx < len(candidates):
-                            selected.append(idx)
-                    except (TypeError, ValueError):
-                        pass
-
-                selected = list(dict.fromkeys(selected))
-                if selected:
-                    log(f"  AI selected scene frames ({model}): {selected[:wanted]}")
-                    return selected[:wanted]
-
-                raise RuntimeError("Gemini returned an empty/invalid selected list.")
-
-            except urllib.error.HTTPError as ex:
-                detail = ""
-                try:
-                    detail = ex.read().decode("utf-8", "replace")[:500]
-                except Exception:
-                    pass
-                if ex.code in (408, 429, 500, 502, 503, 504):
-                    if attempt < 3:
-                        wait = 2 ** attempt
-                        log(
-                            f"  Scene selection {model}: HTTP {ex.code}; "
-                            f"retrying in {wait}s ({attempt}/3)"
-                        )
-                        time.sleep(wait)
-                        continue
-                    log(f"  Scene selection {model}: HTTP {ex.code} after 3 attempts: {detail}")
-                else:
-                    log(f"  Scene selection {model}: HTTP {ex.code}: {detail}")
-                break
-
-            except (urllib.error.URLError, TimeoutError) as ex:
-                if attempt < 3:
-                    wait = 2 ** attempt
-                    log(
-                        f"  Scene selection {model}: temporary network error; "
-                        f"retrying in {wait}s ({attempt}/3): {ex}"
-                    )
-                    time.sleep(wait)
-                    continue
-                log(f"  Scene selection {model}: network error after 3 attempts: {ex}")
-                break
-
-            except Exception as ex:
-                log(f"  Gemini scene selection failed ({model}): {ex}")
-                break
-
-    # Gemini failed completely for this task: use local Qwen3-VL before the
-    # deterministic selector. This path is never reached when Gemini succeeds.
-    try:
-        selected = _local_qwen_scene_select(candidates, wanted)
-        log(f"  AI selected scene frames (local Qwen3-VL): {selected}")
-        return selected
-    except Exception as ex:
-        log(f"  Local Qwen3-VL scene selection failed: {ex}")
-
-    # Deterministic fallback if both Gemini and local AI are unavailable.
-    # The screenshot pipeline therefore continues even during a Gemini outage.
-    log("  Scene Intelligence: Gemini unavailable; using deterministic frame selection.")
-    if len(candidates) <= wanted:
-        return list(range(len(candidates)))
-
-    step = (len(candidates) - 1) / max(1, wanted - 1)
-    return [round(i * step) for i in range(wanted)]
-
-
 def make_screenshots(src, dur, w, h, outdir):
-    """
-    AI Scene Intelligence screenshot pipeline.
-
-    Final screenshots:
-      - exact 16:9
-      - encoded black letterbox bars removed where detectable
-      - no artificial borders
-      - up to 1920x1080
-      - very high JPEG quality
-      - selected by Gemini from scene candidates
-      - extracted from the original source
-    """
-    base_crop = _detect_crop(src, dur, w, h)
-    timestamps = _scene_timestamps(src, dur)
-
-    minimum_candidates = max(8, SCREENSHOTS * 2)
-    if len(timestamps) < minimum_candidates:
-        extra = [
-            dur * i / (minimum_candidates + 1)
-            for i in range(1, minimum_candidates + 1)
-            if 2.0 < dur * i / (minimum_candidates + 1) < dur - 2.0
-        ]
-        timestamps = sorted(set(
-            timestamps + [round(x, 2) for x in extra]
-        ))
-
-    candidates, crop16 = _make_scene_candidates(
-        src, timestamps, base_crop, outdir
-    )
-
-    chosen_indexes = _ai_choose_scene_frames(candidates, SCREENSHOTS)
-
-    if not chosen_indexes:
-        chosen_indexes = list(range(min(SCREENSHOTS, len(candidates))))
-
-    # Fill missing slots without duplicating a selected candidate.
-    used = set(chosen_indexes)
-    for i in range(len(candidates)):
-        if len(chosen_indexes) >= SCREENSHOTS:
-            break
-        if i not in used:
-            chosen_indexes.append(i)
-            used.add(i)
-
-    bw, bh, bx, by = crop16
-
-    # crop16 is already 16:9. Never add padding or black bars.
-    if bw >= 1920:
-        out_w, out_h = 1920, 1080
-    elif bw >= 1280:
-        out_w, out_h = 1280, 720
-    else:
-        out_w = max(2, (bw // 2) * 2)
-        out_h = max(2, (int(out_w * 9 / 16) // 2) * 2)
-
+    """Create screenshots with black letterbox bars removed, then crop to 16:9."""
     files = []
-    for out_index, candidate_index in enumerate(
-        chosen_indexes[:SCREENSHOTS], 1
-    ):
-        t = candidates[candidate_index][0]
-        p = str(outdir / f"shot_{out_index}.jpg")
 
-        vf = (
-            f"crop={bw}:{bh}:{bx}:{by},"
-            f"scale={out_w}:{out_h}:flags=lanczos,"
-            "setsar=1"
-        )
+    # First detect any encoded black bars (letterboxing) in the source.
+    # This is different from simply cropping the source to 16:9: a 16:9
+    # video can itself contain black bars inside its picture area.
+    detected = None
+    detect_t = dur * 0.35
+    try:
+        proc = subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "info",
+            "-ss", f"{detect_t:.2f}", "-i", src,
+            "-frames:v", "1",
+            "-vf", "cropdetect=limit=24:round=2:reset=0",
+            "-f", "null", "-"
+        ], capture_output=True, text=True, check=True)
+        text = (proc.stderr or "") + (proc.stdout or "")
+        matches = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", text)
+        if matches:
+            cw, ch, cx, cy = map(int, matches[-1])
+            # Only accept a meaningful crop; otherwise keep the full frame.
+            if cw >= int(w * 0.70) and ch >= int(h * 0.70):
+                detected = (cw, ch, cx, cy)
+                log(f"  Screenshot black-bar detection: crop={cw}:{ch}:{cx}:{cy}")
+    except Exception as ex:
+        log("  Screenshot black-bar detection skipped:", ex)
 
+    if detected:
+        base_w, base_h, base_x, base_y = detected
+    else:
+        base_w, base_h, base_x, base_y = w, h, 0, 0
+
+    # From the bar-free picture, make a genuine 16:9 center crop.
+    ratio = base_w / base_h
+    if ratio > 16 / 9:
+        cw = int(base_h * 16 / 9)
+        ch = base_h
+        cx = base_x + (base_w - cw) // 2
+        cy = base_y
+    elif ratio < 16 / 9:
+        cw = base_w
+        ch = int(base_w * 9 / 16)
+        cx = base_x
+        cy = base_y + (base_h - ch) // 2
+    else:
+        cw, ch = base_w, base_h
+        cx, cy = base_x, base_y
+
+    cw = max(2, (cw // 2) * 2)
+    ch = max(2, (ch // 2) * 2)
+    cx = max(0, int(cx))
+    cy = max(0, int(cy))
+
+    for i in range(SCREENSHOTS):
+        t = dur * (i + 1) / (SCREENSHOTS + 1)
+        p = str(outdir / f"shot_{i + 1}.jpg")
+        vf = f"crop={cw}:{ch}:{cx}:{cy},scale=1280:720:flags=lanczos"
         run([
             "ffmpeg", "-y", "-loglevel", "error",
-            "-i", src,
-            "-ss", f"{t:.3f}",
+            "-ss", f"{t:.2f}", "-i", src,
             "-frames:v", "1",
             "-vf", vf,
-            "-q:v", "1",
+            "-q:v", "2",
             "-pix_fmt", "yuvj420p",
             p,
         ])
-
         files.append(p)
-        log(
-            f"  Screenshot {out_index}: {t:.2f}s -> "
-            f"{out_w}x{out_h}, AI-selected, high quality"
-        )
 
     return files
 
 
-
-def _gemini_google_image_search(query, outdir):
-    """
-    Use Gemini's Google Search grounding with image_search enabled to find
-    a real web image for the movie poster/thumbnail.
-    Returns a list of candidate image URLs.
-    """
-    prompt = f"""Search Google Images for the movie/film poster for:
-"{query}"
-
-Find the most relevant official or professionally published poster/cover.
-Prefer a clean portrait movie poster, ideally close to 2:3 ratio.
-Avoid fan edits, screenshots, social-media collages, unrelated films,
-logos-only images, and images with large watermarks.
-
-Use image search. Return only a short JSON object:
-{{"query":"{query}"}}.
-Do not invent image URLs; the application will read the image-search results.
-"""
-
-    candidates = []
-
-    for model in dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest"]):
-        try:
-            payload = {
-                "contents": [
-                    {"parts": [{"text": prompt}]}
-                ],
-                "tools": [
-                    {
-                        "google_search": {
-                            "search_types": {
-                                "image_search": {}
-                            }
-                        }
-                    }
-                ],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": 0.1,
-                },
-            }
-
-            endpoint = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                + urllib.parse.quote(model, safe="")
-                + ":generateContent?key="
-                + urllib.parse.quote(GEMINI_KEY, safe="")
-            )
-
-            req = urllib.request.Request(
-                endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "MovieBot/1.0",
-                },
-                method="POST",
-            )
-
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read().decode("utf-8", "replace"))
-
-            # REST response uses camelCase. Accept snake_case too so the
-            # function remains tolerant of SDK/proxy transformations.
-            candidates_json = data.get("candidates") or []
-            for candidate in candidates_json:
-                gm = (
-                    candidate.get("groundingMetadata")
-                    or candidate.get("grounding_metadata")
-                    or {}
-                )
-                chunks = (
-                    gm.get("groundingChunks")
-                    or gm.get("grounding_chunks")
-                    or []
-                )
-
-                for chunk in chunks:
-                    image = chunk.get("image") or {}
-                    image_uri = (
-                        image.get("imageUri")
-                        or image.get("image_uri")
-                    )
-                    if image_uri:
-                        candidates.append(image_uri)
-
-                # If the model happened to return a URL in text, keep it as
-                # a secondary candidate; grounding image URLs remain preferred.
-                for part in (candidate.get("content") or {}).get("parts") or []:
-                    value = part.get("text") or ""
-                    for url in re.findall(r"https?://[^\s\"'<>]+", value):
-                        candidates.append(url.rstrip(".,)"))
-
-            candidates = list(dict.fromkeys(candidates))
-            if candidates:
-                log(f"  Google Image Search found {len(candidates)} image candidate(s)")
-                return candidates[:8]
-
-            log(f"  Gemini Google Image Search returned no image candidates ({model})")
-
-        except Exception as ex:
-            log(f"  Gemini Google Image Search failed ({model}): {ex}")
-
-    return []
-
-
-def _download_web_image(url, path):
-    """Download one image-search result without loading an entire movie."""
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
-            ),
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        },
-    )
-
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        data = resp.read()
-
-    if len(data) < 2048:
-        raise RuntimeError("Downloaded image is too small.")
-
-    Path(path).write_bytes(data)
-
-
-def _make_2x3_thumbnail_from_image(src_image, out_path):
-    """
-    Convert a web poster to a clean 2:3 portrait thumbnail.
-    No 9:16 crop and no artificial black borders.
-    """
-    probe_json = subprocess.check_output([
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "json", str(src_image)
-    ])
-    info = json.loads(probe_json)
-    stream = info["streams"][0]
-    iw = int(stream["width"])
-    ih = int(stream["height"])
-
-    if iw <= 0 or ih <= 0:
-        raise RuntimeError("Invalid downloaded image dimensions.")
-
-    # Target poster ratio = 2:3, matching the reference-style movie cards.
-    if iw / ih > 2 / 3:
-        ch = ih
-        cw = int(ih * 2 / 3)
-        cx = (iw - cw) // 2
-        cy = 0
+def make_thumbnail(src, dur, w, h, outdir):
+    """9:16 portrait thumbnail, 720x1280, centre crop from a frame at 35%."""
+    if w * 16 >= h * 9:
+        ch = h // 2 * 2
+        cw = int(h * 9 / 16) // 2 * 2
     else:
-        cw = iw
-        ch = int(iw * 3 / 2)
-        cx = 0
-        cy = (ih - ch) // 2
-
-    cw = max(2, (cw // 2) * 2)
-    ch = max(2, (ch // 2) * 2)
-    cx = max(0, min(cx, iw - cw))
-    cy = max(0, min(cy, ih - ch))
-
-    # 720x1080 = exact 2:3. This is intentionally NOT 9:16.
-    run([
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-i", str(src_image),
-        "-vf",
-        f"crop={cw}:{ch}:{cx}:{cy},scale=720:1080:flags=lanczos,setsar=1",
-        "-frames:v", "1",
-        "-q:v", "1",
-        "-pix_fmt", "yuvj420p",
-        str(out_path),
-    ])
-
-    return str(out_path)
-
-
-def make_thumbnail(src, dur, w, h, outdir, movie_title="", filename_hint=""):
-    """
-    Google-search poster thumbnail.
-
-    Priority:
-      1. Gemini + Google Image Search result
-      2. If search/download fails, create a 2:3 thumbnail from the source
-
-    The final image is always 2:3 (720x1080), never 9:16.
-    """
-    title = str(movie_title or "").strip()
-    hint = clean_hint(filename_hint) if filename_hint else ""
-    query = title or hint or "movie poster"
-    if hint and title and hint.lower() not in title.lower():
-        query = f"{title} {hint}"
-
-    raw_dir = outdir / "web_thumbnail_candidates"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-
-    image_urls = _gemini_google_image_search(
-        f"{query} official movie poster",
-        raw_dir
-    )
-
-    for i, image_url in enumerate(image_urls, 1):
-        raw_path = raw_dir / f"poster_{i}.source"
-        final_path = outdir / "thumb_2x3.jpg"
-
-        try:
-            log(f"  Trying Google image poster {i}/{len(image_urls)}")
-            _download_web_image(image_url, raw_path)
-            _make_2x3_thumbnail_from_image(raw_path, final_path)
-
-            if final_path.exists() and final_path.stat().st_size > 10_000:
-                log("  Thumbnail source: Google Image Search")
-                log("  Thumbnail size: 720x1080 (2:3)")
-                return str(final_path)
-
-        except Exception as ex:
-            log(f"  Google poster candidate {i} failed: {ex}")
-            try:
-                raw_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-    # Safe fallback: still use the requested reference-style 2:3 ratio,
-    # but never revert to the old 9:16 thumbnail.
-    log("  Google poster unavailable; using source-frame 2:3 fallback.")
-
-    if w / h > 2 / 3:
-        ch = h
-        cw = int(h * 2 / 3)
-    else:
-        cw = w
-        ch = int(w * 3 / 2)
-
-    cw = max(2, (cw // 2) * 2)
-    ch = max(2, (ch // 2) * 2)
-
-    p = str(outdir / "thumb_2x3.jpg")
-    run([
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-ss", f"{dur * 0.35:.2f}",
-        "-i", src,
-        "-frames:v", "1",
-        "-vf", f"crop={cw}:{ch},scale=720:1080:flags=lanczos,setsar=1",
-        "-q:v", "1",
-        "-pix_fmt", "yuvj420p",
-        p
-    ])
+        cw = w // 2 * 2
+        ch = int(w * 16 / 9) // 2 * 2
+    p = str(outdir / "thumb_9x16.jpg")
+    run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{dur * 0.35:.2f}", "-i", src,
+         "-frames:v", "1", "-vf", f"crop={cw}:{ch},scale=720:1280", "-q:v", "2", p])
     return p
+
 
 def analysis_inputs(src, dur, outdir):
     frames = []
@@ -1368,308 +653,70 @@ def clean_hint(filename):
     return no_year or t
 
 
-def _gemini_multimodal_json_rest(model, prompt, frames, audio_bytes=None):
-    """Gemini multimodal JSON call through REST; avoids SDK AFC warnings."""
-    parts = [{"text": prompt}]
-    for b in frames:
-        parts.append({
-            "inline_data": {
-                "mime_type": "image/jpeg",
-                "data": base64.b64encode(b).decode("ascii"),
-            }
-        })
-    if audio_bytes:
-        parts.append({
-            "inline_data": {
-                "mime_type": "audio/mp3",
-                "data": base64.b64encode(audio_bytes).decode("ascii"),
-            }
-        })
-
-    payload = {
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.2,
-        },
-    }
-    endpoint = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + urllib.parse.quote(model, safe="")
-        + ":generateContent?key="
-        + urllib.parse.quote(GEMINI_KEY, safe="")
-    )
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "MovieBot/1.0"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        response = json.loads(resp.read().decode("utf-8", "replace"))
-
-    texts = []
-    for candidate in response.get("candidates") or []:
-        for part in (candidate.get("content") or {}).get("parts") or []:
-            if part.get("text"):
-                texts.append(part["text"])
-    text = "\n".join(texts).strip()
-    if not text:
-        raise RuntimeError("Gemini returned no text.")
-    return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip())
-
-
-def _gemini_imdb_lookup(title, year=None, language=""):
-    """Look up an IMDb rating through Gemini Google Search grounding.
-
-    We only accept a rating when Gemini returns an IMDb source URL and the
-    matched title/year are reasonably consistent. Otherwise return N/A.
-    """
-    title = str(title or "").strip()
-    if not title:
-        return "N/A"
-
-    year_text = str(year) if year else ""
-    prompt = f"""Search the web for the exact movie/title below and verify its IMDb rating.
-Movie title: {title}
-Release year: {year_text or 'unknown'}
-Language: {language or 'unknown'}
-
-IMPORTANT:
-- Use ONLY the official IMDb website (imdb.com) as the source for the rating.
-- Do NOT guess or invent a rating.
-- Match the title and release year carefully. If the title/year cannot be confidently matched,
-  return rating as N/A.
-- If IMDb has no displayed rating, return N/A.
-- Return ONLY JSON with exactly these keys:
-  matched_title: exact IMDb title if found, otherwise "",
-  matched_year: year if found, otherwise null,
-  rating: IMDb aggregate rating such as "7.2/10", otherwise "N/A",
-  imdb_url: official IMDb title URL if found, otherwise ""
-"""
-
-    models = []
-    for m in [
-        os.environ.get("IMDB_GEMINI_MODEL", "gemini-2.5-flash"),
-        GEMINI_MODEL,
-        "gemini-2.5-flash",
-    ]:
-        if m and m not in models:
-            models.append(m)
-
-    for model in models:
-        for attempt in range(1, 3):
-            try:
-                payload = {
-                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "tools": [{"google_search": {}}],
-                    "generationConfig": {
-                        "responseMimeType": "application/json",
-                        "temperature": 0.0,
-                    },
-                }
-                endpoint = (
-                    "https://generativelanguage.googleapis.com/v1beta/models/"
-                    + urllib.parse.quote(model, safe="")
-                    + ":generateContent?key="
-                    + urllib.parse.quote(GEMINI_KEY, safe="")
-                )
-                req = urllib.request.Request(
-                    endpoint,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json", "User-Agent": "MovieBot/1.0"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=90) as resp:
-                    response = json.loads(resp.read().decode("utf-8", "replace"))
-
-                texts = []
-                imdb_sources = []
-                for candidate in response.get("candidates") or []:
-                    for part in (candidate.get("content") or {}).get("parts") or []:
-                        if part.get("text"):
-                            texts.append(part["text"])
-                    gm = candidate.get("groundingMetadata") or candidate.get("grounding_metadata") or {}
-                    for chunk in gm.get("groundingChunks") or gm.get("grounding_chunks") or []:
-                        web = chunk.get("web") or {}
-                        uri = web.get("uri") or web.get("url") or ""
-                        if "imdb.com" in uri.lower():
-                            imdb_sources.append(uri)
-
-                text = "\n".join(texts).strip()
-                if not text:
-                    raise RuntimeError("IMDb lookup returned no text")
-                data = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip())
-
-                matched_title = str(data.get("matched_title") or "").strip()
-                matched_year = data.get("matched_year")
-                rating = str(data.get("rating") or "N/A").strip()
-                imdb_url = str(data.get("imdb_url") or "").strip()
-                if not imdb_url and imdb_sources:
-                    imdb_url = imdb_sources[0]
-
-                # Strict validation: the URL must actually come from Gemini's
-                # IMDb grounding result, and the rating must be on IMDb's 1-10 scale.
-                normalized_returned = imdb_url.split("?")[0].rstrip("/").lower()
-                grounded_match = any(
-                    normalized_returned == src.split("?")[0].rstrip("/").lower()
-                    for src in imdb_sources
-                ) if imdb_sources else False
-                m = re.fullmatch(r"(?:10(?:\.0)?|[1-9](?:\.[0-9])?)/10", rating)
-                if not grounded_match or "imdb.com" not in imdb_url.lower() or not m:
-                    log(f"  IMDb lookup: no verified rating for '{title}'")
-                    return "N/A"
-
-                # Guard against an unrelated same-name result.
-                ratio = difflib.SequenceMatcher(
-                    None, re.sub(r"\W+", "", title.lower()),
-                    re.sub(r"\W+", "", matched_title.lower())
-                ).ratio() if matched_title else 0.0
-                year_ok = True
-                if year and matched_year:
-                    try:
-                        year_ok = int(matched_year) == int(year)
-                    except Exception:
-                        year_ok = False
-
-                if ratio < 0.72 or not year_ok:
-                    log(f"  IMDb lookup: title/year mismatch for '{title}' -> '{matched_title}' ({matched_year})")
-                    return "N/A"
-
-                log(f"  IMDb verified: {matched_title} ({matched_year or year_text}) = {rating}")
-                return rating
-
-            except urllib.error.HTTPError as ex:
-                if ex.code in (408, 429, 500, 502, 503, 504) and attempt < 2:
-                    time.sleep(2 ** attempt)
-                    continue
-                log(f"  IMDb lookup via Gemini failed on {model}: HTTP {ex.code}")
-                break
-            except Exception as ex:
-                log(f"  IMDb lookup via Gemini failed on {model}: {ex}")
-                break
-
-    return "N/A"
-
-
 def analyze(filename_hint, frames, audio_bytes, site_labels):
     hint = clean_hint(filename_hint)
     year = find_year(filename_hint)
-    prompt = f"""You are a film writer and metadata editor for an ORIGINAL movie blog.
-You get 12 frames spread across the film and an audio sample.
+    prompt = f"""You are a film writer. You are publishing an ORIGINAL film, on its own director's film
+blog. You get 12 frames spread across the film and an audio sample.
 File name hint (may be messy): "{hint}". Language hint (may be empty): "{LANGUAGE_HINT}".
 Director name (may be empty): "{DIRECTOR_NAME}".
 
 Rules:
 - Write everything in your own words, in natural English. Never copy text from any website, film or review.
-- Base movie facts ONLY on what you can actually see/hear and the filename hint. If uncertain, use a safe general value.
-- Do not invent cast, crew, awards, festivals, box office, IMDb pages, or exact plot facts.
-- If the filename looks like a genuine movie title, preserve that title when reasonably confident; otherwise create a clean cinematic title from the film content.
-- Title must be 1-6 words, with no hashtags, emojis, year, "trending reels", "watch online" or "download".
-- The website description must be concise and spoiler-light: 1-2 short paragraphs, about 80-140 words total.
-- Language should list the languages actually evident from the audio/filename when possible, for example "Hindi - English".
-- Original language should be the primary/original spoken language when reasonably identifiable; otherwise "Unknown".
-- Genres should be 1-3 suitable genres based on the film.
-- Content rating should be one of "General audience", "Teen and above", "Mature audience".
-- No piracy words in title/description/metadata (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
+- Base it ONLY on what you can actually see and hear in the frames and audio. If you are unsure,
+  stay general and talk about mood, visuals, sound and themes instead of specific plot facts.
+- Never invent cast, crew, awards, festivals, ratings, box office or plot facts you cannot see.
+- No piracy words (leaked, HD print, free download full movie, WEB-DL, dual audio, 300mb).
+- The title must be a real film title of 1-6 words. No hashtags, emojis, year or words like "trending reels".
+  If the file name hint is messy, invent a fitting title from what the film is about.
 
 Return ONLY JSON with these keys:
-  title: clean film title,
-  tagline: one short sentence, max 18 words,
-  description: 1-2 short paragraphs, about 80-140 words total, spoiler-light,
-  imdb_rating: always return "N/A" here; IMDb will be verified separately through official IMDb search,
-  language: display language(s), e.g. "Hindi - English",
-  original_language: original/main language, e.g. "English",
+  title: the film title,
+  tagline: one sentence, max 20 words,
+  synopsis: 2 short paragraphs (about 120 words), spoiler-light, separated by a blank line,
+  review: 3-4 paragraphs (about 300 words) analysing tone, visual style and camera work, sound and
+          music, performances in general terms, themes and who will enjoy the film,
+          separated by blank lines,
+  themes: list of 3-5 short phrases,
+  faq: list of 4 objects {{"q": "...", "a": "..."}} with 1-2 sentence answers about the film
+       (genre, language, mood, who it suits, runtime feel),
   genres: list of 1-3 genres,
-  content_rating: one of the allowed values,
+  language: main spoken language,
+  content_rating: one of "General audience", "Teen and above", "Mature audience",
   tags: list of up to 6 short keywords,
   labels: pick 1-4 categories that best fit this film, ONLY from this exact list
-          (copy spelling exactly): {json.dumps(site_labels)}.
-          Judge by language spoken, film industry/country, and type. Ignore encoding/file-format labels."""
+          (copy the spelling exactly): {json.dumps(site_labels)}.
+          Judge by language spoken, film industry/country, and type (movie, web series,
+          trailer, song, etc.). Ignore labels about video encoding or file format."""
+    parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
+    parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/mp3"))
     data = {}
-    analysis_models = []
-    for model in [GEMINI_MODEL, os.environ.get("ANALYSIS_GEMINI_FALLBACK", "gemini-3.5-flash"), "gemini-2.5-flash"]:
-        if model and model not in analysis_models:
-            analysis_models.append(model)
-
-    for model in analysis_models:
-        for attempt in range(1, 4):
-            try:
-                data = _gemini_multimodal_json_rest(model, prompt, frames, audio_bytes)
-                log("  Gemini model used:", model)
-                break
-            except urllib.error.HTTPError as ex:
-                detail = ""
-                try:
-                    detail = ex.read().decode("utf-8", "replace")[:500]
-                except Exception:
-                    pass
-                if ex.code in (408, 429, 500, 502, 503, 504) and attempt < 3:
-                    wait = 2 ** attempt
-                    log(f"  Gemini analysis {model}: HTTP {ex.code}; retrying in {wait}s ({attempt}/3)")
-                    time.sleep(wait)
-                    continue
-                log(f"  Gemini analysis {model}: HTTP {ex.code}: {detail}")
-                break
-            except (urllib.error.URLError, TimeoutError) as ex:
-                if attempt < 3:
-                    wait = 2 ** attempt
-                    log(f"  Gemini analysis {model}: temporary network error; retrying in {wait}s ({attempt}/3)")
-                    time.sleep(wait)
-                    continue
-                log(f"  Gemini analysis {model}: network error after 3 attempts: {ex}")
-                break
-            except Exception as e:  # noqa
-                log(f"  Gemini model {model} failed: {e}")
-                break
-        if data:
-            break
-
-    if not data:
+    for model in dict.fromkeys([GEMINI_MODEL, "gemini-flash-latest"]):
         try:
-            # Reconstruct temporary frame files for the local multimodal model.
-            local_dir = WORK / "local_ai_frames"
-            local_dir.mkdir(parents=True, exist_ok=True)
-            local_paths = []
-            for i, frame_bytes in enumerate(frames[:LOCAL_AI_MAX_IMAGES]):
-                fp = local_dir / f"frame_{i}.jpg"
-                fp.write_bytes(frame_bytes)
-                local_paths.append(fp)
-            data = _local_qwen_analyze(filename_hint, local_paths, site_labels)
-            log("  Local Qwen3-VL metadata fallback succeeded.")
-        except Exception as ex:
-            log(f"  Local Qwen3-VL metadata fallback failed: {ex}")
-
+            resp = retry(lambda: gclient.models.generate_content(
+                model=model, contents=[prompt, *parts],
+                config=types.GenerateContentConfig(response_mime_type="application/json")), tries=2)
+            data = json.loads(re.sub(r"^```json|```$", "", resp.text.strip()).strip())
+            log("  Gemini model used:", model)
+            break
+        except Exception as e:  # noqa
+            log(f"  Gemini model {model} failed: {e}")
     if not data:
-        log("  Using deterministic fallback text.")
-
-    desc = as_paragraphs(data.get("description"))
-    if not desc:
-        desc = as_paragraphs(data.get("synopsis"))
-    if not desc:
-        desc = ["An original film."]
-
+        log("  Using fallback text.")
     faq = [f for f in (data.get("faq") or []) if isinstance(f, dict) and f.get("q") and f.get("a")]
-    final_title = str(data.get("title") or hint or "Untitled Film").strip()
-    # IMDb is checked separately using official IMDb search grounding.
-    imdb_rating = _gemini_imdb_lookup(final_title, year, data.get("language") or LANGUAGE_HINT)
     return {
-        "title": final_title,
-        "tagline": str(data.get("tagline") or "").strip(),
-        "description": desc[:2],
-        "imdb_rating": imdb_rating,
-        "language": str(data.get("language") or LANGUAGE_HINT or "Unknown").strip(),
-        "original_language": str(data.get("original_language") or data.get("language") or LANGUAGE_HINT or "Unknown").strip(),
-        "genres": [str(g).strip() for g in (data.get("genres") or ["Drama"]) if str(g).strip()][:3],
-        "content_rating": str(data.get("content_rating") or "General audience").strip(),
-        "tags": [str(t).strip() for t in (data.get("tags") or []) if str(t).strip()][:6],
-        "release_year": year,
-        "labels": pick_labels(data.get("labels"), site_labels),
-        # Kept for compatibility with any other code that may read these fields.
-        "synopsis": desc[:2],
-        "review": [],
-        "themes": [],
+        "title": data.get("title") or hint or "Untitled Film",
+        "tagline": data.get("tagline") or "",
+        "synopsis": as_paragraphs(data.get("synopsis")) or ["An original film."],
+        "review": as_paragraphs(data.get("review")),
+        "themes": [str(t) for t in (data.get("themes") or [])][:5],
         "faq": faq[:4],
+        "genres": data.get("genres") or ["Drama"],
+        "language": data.get("language") or LANGUAGE_HINT or "Unknown",
+        "release_year": year,
+        "content_rating": data.get("content_rating") or "General audience",
+        "tags": data.get("tags") or [],
+        "labels": pick_labels(data.get("labels"), site_labels),
     }
 
 
@@ -1733,196 +780,107 @@ TIMER_SCRIPT = """<script>
 </script>""" % WAIT_SECONDS
 
 
-def _post_colors(title):
-    """Pick a stable-but-different color theme per movie post."""
-    palettes = [
-        {"heading": "#ffbf00", "rating": "#18e000", "label": "#e8e8e8", "value": "#f5f5f5", "lang": "#ff3030", "quality": "#ff3030"},
-        {"heading": "#00d9ff", "rating": "#7dff2a", "label": "#ededed", "value": "#ffffff", "lang": "#ff4f81", "quality": "#ff4f81"},
-        {"heading": "#ff6b35", "rating": "#65ff4d", "label": "#eeeeee", "value": "#ffffff", "lang": "#ff2f92", "quality": "#ff2f92"},
-        {"heading": "#b56cff", "rating": "#48ff9b", "label": "#ededed", "value": "#ffffff", "lang": "#ff4d4d", "quality": "#ff4d4d"},
-        {"heading": "#ffd166", "rating": "#39ff14", "label": "#f0f0f0", "value": "#ffffff", "lang": "#00d9ff", "quality": "#00d9ff"},
-        {"heading": "#00e5a8", "rating": "#a8ff00", "label": "#ededed", "value": "#ffffff", "lang": "#ff3b30", "quality": "#ff3b30"},
-        {"heading": "#ff8c42", "rating": "#00ff7f", "label": "#eeeeee", "value": "#ffffff", "lang": "#ff4d6d", "quality": "#ff4d6d"},
-        {"heading": "#4dabf7", "rating": "#7cff00", "label": "#eeeeee", "value": "#ffffff", "lang": "#ff5c8a", "quality": "#ff5c8a"},
-    ]
-    digest = hashlib.sha256(str(title).encode("utf-8")).hexdigest()
-    return palettes[int(digest[:8], 16) % len(palettes)]
-
-
 def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     e = html.escape
-    raw_title = str(meta["title"])
-    title = e(raw_title)
+    title = e(meta["title"])
     year = meta["release_year"]
     ytxt = f" ({year})" if year else ""
-    lang_known = meta.get("language") and str(meta["language"]).lower() != "unknown"
-    lang = e(str(meta.get("language") or "Unknown"))
-    original_lang = e(str(meta.get("original_language") or "Unknown"))
-    genres = ", ".join(e(g) for g in meta.get("genres", [])) or "Drama"
+    lang_known = meta["language"] and meta["language"].lower() != "unknown"
+    lang = e(meta["language"])
+    lang_tag = f' <span style="color:#f2f200">{{{lang}}}</span>' if lang_known else ""
+    genres = ", ".join(e(g) for g in meta["genres"])
     fps_txt = fmt_fps(fps)
     qualities = " - ".join(f"{h}p" for h, _, _ in outputs)
     sizes = " - ".join(human(s) for _, _, s in outputs)
-    colors = _post_colors(raw_title)
+    syn = [e(p) for p in meta["synopsis"]]
+    review = [e(p) for p in meta["review"]]
 
-    # Movie Info layout copied from bot-9.py, while keeping the current
-    # verified IMDb rating system.
-    info_title = (
-        f'<h3 style="text-align:center;color:{colors["heading"]};'
-        f'font-size:22px;line-height:1.4;margin:28px 0 18px;font-weight:800">'
-        'Movie Info</h3>'
-    )
+    btn = ("display:block;width:260px;max-width:90%;margin:0 auto 28px;padding:18px 10px;"
+           "text-align:center;color:#fff;font-weight:800;font-size:19px;"
+           "text-decoration:none;cursor:pointer;"
+           "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
+           "box-shadow:0 8px 14px rgba(0,0,0,.45);")
+    head = ("text-align:center;color:#fff;font-size:21px;line-height:1.4;"
+            "margin:28px 0 18px;font-weight:800")
+    hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.6);margin:22px 0"/>'
+    h3 = '<h3 style="text-align:center">{}</h3>'
 
-    info = []
-    rating = str(meta.get("imdb_rating") or "N/A")
-    info.append(
-        f'<div><span style="color:{colors["rating"]};font-weight:800;">'
-        f'👉 IMDb Rating:-</span> '
-        f'<span style="color:{colors["value"]};font-weight:700;">{e(rating)}</span></div>'
-    )
-    info.append(
-        f'<div><b style="color:{colors["label"]};">Movie Name:</b> '
-        f'<span style="color:{colors["value"]};">{title}</span></div>'
-    )
+    info = [f"<b>Movie Name:</b> {title}"]
     if year:
-        info.append(
-            f'<div><b style="color:{colors["label"]};">Release Year:</b> '
-            f'<span style="color:{colors["value"]};">{year}</span></div>'
-        )
+        info.append(f"<b>Release Year:</b> {year}")
     if DIRECTOR_NAME:
-        info.append(
-            f'<div><b style="color:{colors["label"]};">Directed by:</b> '
-            f'<span style="color:{colors["value"]};">{e(DIRECTOR_NAME)}</span></div>'
-        )
+        info.append(f"<b>Directed by:</b> {e(DIRECTOR_NAME)}")
     if lang_known:
-        info.append(
-            f'<div><b style="color:{colors["label"]};">Language:</b> '
-            f'<span style="color:{colors["lang"]};">{lang}</span></div>'
-        )
+        info.append(f"<b>Language:</b> {lang}")
     info += [
-        f'<div><b style="color:{colors["label"]};">Runtime:</b> '
-        f'<span style="color:{colors["value"]};">{fmt_runtime(dur)}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Genres:</b> '
-        f'<span style="color:{colors["value"]};">{genres}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Content Advisory:</b> '
-        f'<span style="color:{colors["value"]};">{e(meta["content_rating"])}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Quality:</b> '
-        f'<span style="color:{colors["quality"]};">{qualities}</span></div>',
-        f'<div><b style="color:{colors["label"]};">Frame Rate:</b> '
-        f'<span style="color:{colors["value"]};">{fps_txt}fps</span></div>',
-        f'<div><b style="color:{colors["label"]};">Size:</b> '
-        f'<span style="color:{colors["value"]};">{sizes}</span></div>',
+        f"<b>Runtime:</b> {fmt_runtime(dur)}",
+        f"<b>Genres:</b> {genres}",
+        f"<b>Content Advisory:</b> {e(meta['content_rating'])}",
+        f"<b>Quality:</b> {qualities}",
+        f"<b>Frame Rate:</b> {fps_txt}fps",
+        f"<b>Size:</b> {sizes}",
     ]
 
-    btn = (
-        "display:block;width:200px;max-width:82%;margin:0 auto 18px;padding:11px 8px;"
-        "text-align:center;color:#fff;font-weight:800;font-size:14px;"
-        "text-decoration:none;cursor:pointer;border-radius:6px;"
-        "background:linear-gradient(90deg,#57a51c,#1f4fb4);"
-        "box-shadow:0 8px 14px rgba(0,0,0,.45);"
-    )
-    head = (
-        "text-align:center;color:#fff;font-size:15px;line-height:1.3;"
-        "margin:16px 0 10px;font-weight:800"
-    )
-    hr = '<hr style="border:0;border-top:1px solid rgba(255,255,255,.35);margin:24px 0"/>'
+    parts = [
+        f'<div style="text-align:center"><img src="{img_url(thumb_id)}" alt="{title}" '
+        f'width="270" style="max-width:60%;height:auto;border-radius:8px"/></div>',
+        f'<p style="text-align:center"><b>{title}{ytxt}</b>{" - " + lang + " film" if lang_known else ""}</p>',
+    ]
+    if meta["tagline"]:
+        parts.append(f'<p style="text-align:center"><i>{e(meta["tagline"])}</i></p>')
+    parts.append(f"<p>{syn[0]}</p>")
+    parts.append(h3.format("Movie Info"))
+    parts.append("<p>" + "<br/>".join(info) + "</p>")
+    parts.append(h3.format("Movie Synopsis / Plot"))
+    parts += [f"<p>{p}</p>" for p in syn]
 
-    parts = []
-
-    # 1) 2:3 Google Image Search poster
-    parts.append(
-        f'<div style="text-align:center;margin:0 auto 18px;">'
-        f'<img src="{img_url(thumb_id)}" alt="{title}" '
-        f'width="360" style="display:block;width:360px;max-width:72%;height:auto;'
-        f'margin:0 auto;border-radius:8px;box-shadow:0 8px 22px rgba(0,0,0,.35);"/>'
-        f'</div>'
-    )
-
-    # 2) Title
-    parts.append(
-        f'<h2 style="text-align:center;color:{colors["heading"]};font-size:24px;'
-        f'line-height:1.3;margin:10px 0 28px;font-weight:800;">{title}</h2>'
-    )
-
-    # 3) Movie Info — same field structure/style as bot-9.py, with the
-    # current verified IMDb rating added at the top.
-    parts.append(info_title)
-    parts.append(
-        '<p style="font-size:16px;line-height:1.55;margin:0 0 22px;">'
-        + "<br/>".join(info) +
-        '</p>'
-    )
-
-    # 4) VCDN player — immediately after Movie Info.
-    parts.append(
-        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
-        f'margin:28px 0 18px;">Watch {title} Online</h3>'
-    )
+    parts.append(f"<h3>Watch {title} Online</h3>")
     embed_url = vcdn["embed_url"]
     parts.append(
-        f'<div style="position:relative;width:100%;padding-top:56.25%;'
-        f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 28px">'
+        f'<div style="position:relative;width:100%;max-width:100%;padding-top:56.25%;'
+        f'background:#000;border-radius:8px;overflow:hidden;margin:0 auto 24px">'
         f'<iframe src="{e(embed_url, quote=True)}" '
-'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
-'frameborder="0" '
-'allow="autoplay; encrypted-media; picture-in-picture; fullscreen" '
-'allowfullscreen="true" '
-'webkitallowfullscreen="true" '
-'mozallowfullscreen="true"></iframe>'
-        f'</div>'
-    )
+        'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" '
+        'frameborder="0" '
+        'allow="fullscreen *; autoplay *; encrypted-media *; picture-in-picture *" '
+        'allowfullscreen></iframe>'
+        f'</div>')
 
-    # 5) Screenshots — no description/review/info between player and screenshots.
-    parts.append(
-        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
-        f'margin:28px 0 18px;">Screenshots</h3>'
-    )
+    if review:
+        parts.append(h3.format(f"{title} - Film Review and Analysis"))
+        parts += [f"<p>{p}</p>" for p in review]
+    if meta["themes"]:
+        parts.append(h3.format("Themes"))
+        parts.append("<ul>" + "".join(f"<li>{e(t)}</li>" for t in meta["themes"]) + "</ul>")
+    parts.append(h3.format("Screenshots"))
     for fid in shot_ids:
         parts.append(
-            f'<div style="width:100%;max-width:1920px;margin:0 auto 18px;line-height:0;'
-            f'padding:0;background:none;">'
+            f'<div style="width:100%;max-width:1280px;margin:0 auto 18px;line-height:0;padding:0;background:none;">'
             f'<img src="{img_url(fid)}" alt="{title} screenshot" '
-            'style="display:block;width:100%;height:auto;max-width:1920px;margin:0;padding:0;'
-            'border:0;outline:0;box-shadow:none"/>'
+            'style="display:block;width:100%;height:auto;max-width:1280px;margin:0;padding:0;border:0;outline:0;box-shadow:none"/>'
             f'</div>'
         )
 
-    # 6) Download buttons — directly after screenshots. Nothing else in between.
     parts.append(hr)
-    parts.append(
-        f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
-        f'margin:28px 0 18px;">Download Links</h3>'
-    )
+    parts.append(h3.format("Download Links"))
     for h, fid, size in outputs:
         direct = (f"https://drive.usercontent.google.com/download?id={fid}"
                   "&amp;export=download&amp;confirm=t")
         parts.append(
-            f'<h4 style="{head}">{h}p x264 {fps_txt}fps '
-            f'[{human(size)}]</h4>'
-        )
+            f'<h4 style="{head}">{title}{ytxt}{lang_tag} '
+            f'{h}p x264 {fps_txt}fps [{human(size)}]</h4>')
         parts.append(
             f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
-            '&#11015;&#9889; DOWNLOAD NOW &#9889;&#11015;</a>'
-        )
-
-    # 7) Description — intentionally AFTER all download buttons.
-    description = [e(p) for p in meta.get("description", []) if str(p).strip()]
-    if meta.get("tagline"):
-        parts.append(hr)
-        parts.append(
-            f'<p style="text-align:center;color:{colors["heading"]};font-size:20px;'
-            f'font-weight:700;margin:22px 0 14px;"><i>{e(meta["tagline"])}</i></p>'
-        )
-    if description:
-        parts.append(
-            f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
-            f'margin:28px 0 18px;">Description</h3>'
-        )
-        for p in description:
-            parts.append(f'<p style="line-height:1.75;font-size:18px;">{p}</p>')
-
+            '&#11015;&#9889;DOWNLOAD NOW&#9889;&#11015;</a>')
     parts.append(hr)
+    if meta["faq"]:
+        parts.append(h3.format(f"{title} - FAQ"))
+        for f in meta["faq"]:
+            parts.append(f"<h4>{e(str(f['q']))}</h4><p>{e(str(f['a']))}</p>")
+    parts.append('<h3 style="text-align:center;color:#f0a0ff">Winding Up &#10084;&#65039;</h3>')
     parts.append(TIMER_SCRIPT)
     return "\n".join(parts)
+
 
 # ---------- main pipeline ----------
 def process(video, processed_folder, output_folder):
@@ -1939,8 +897,9 @@ def process(video, processed_folder, output_folder):
     short = min(w, h)
     log(f"Duration {dur / 60:.1f} min, {w}x{h}, {fps:.2f} fps")
 
-    log("Making AI-selected screenshots...")
+    log("Making screenshots and thumbnail...")
     shots = make_screenshots(src, dur, w, h, job)
+    thumb = make_thumbnail(src, dur, w, h, job)
 
     log("Analysing with Gemini...")
     site_labels = get_site_labels()
@@ -1948,13 +907,6 @@ def process(video, processed_folder, output_folder):
     meta = analyze(name, frames, audio, site_labels)
     log("  Title:", meta["title"])
     log("  Labels:", meta["labels"])
-
-    log("Searching Google Images for movie poster thumbnail...")
-    thumb = make_thumbnail(
-        src, dur, w, h, job,
-        movie_title=meta["title"],
-        filename_hint=name,
-    )
 
     targets = sorted({t for t in RESOLUTIONS if t <= short * 1.05}) or [short]
     outputs = []
@@ -1995,7 +947,7 @@ def process(video, processed_folder, output_folder):
     ytxt = f' ({meta["release_year"]})' if meta["release_year"] else ""
     ltxt = f' {meta["language"]}' if meta["language"].lower() != "unknown" else ""
     body = {"kind": "blogger#post",
-            "title": f'{meta["title"]}{ytxt}{ltxt}',
+            "title": f'{meta["title"]}{ytxt}{ltxt} Movie - Watch Online & Download',
             "content": content, "labels": labels}
     post = retry(lambda: blogger.posts().insert(
         blogId=BLOG_ID, body=body, isDraft=not PUBLISH).execute())
