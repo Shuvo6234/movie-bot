@@ -1,41 +1,21 @@
-name: Movie Bot
+#!/usr/bin/env python3
+"""
+Movie Bot automatic launcher.
 
-on:
-  workflow_dispatch:
+The current bot.py already checks the configured Google Drive input folder.
+If there are no new videos, bot.py exits without doing anything.
+If a video is present, bot.py processes it normally.
+"""
 
-jobs:
-  movie-bot:
-    runs-on: ubuntu-latest
+import subprocess
+import sys
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
-      - name: Check files
-        run: |
-          echo "Current directory:"
-          pwd
-          echo "Files:"
-          ls -la
-          echo "Python files:"
-          find . -maxdepth 3 -type f -name "*.py" -print
+def main() -> int:
+    print("Checking Google Drive input folder...")
+    print("Starting bot.py; it will process only new videos found in the input folder.")
+    return subprocess.call([sys.executable, "bot.py"])
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run Movie Bot
-        env:
-          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
-          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
-          IA_IDENTIFIER_PREFIX: movie-bot
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
-        run: |
-          python bot.py
+if __name__ == "__main__":
+    raise SystemExit(main())
