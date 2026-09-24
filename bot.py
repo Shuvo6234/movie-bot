@@ -393,14 +393,46 @@ def vcdn_upload(path, title):
     embed_url = complete.get("embed_url") or complete.get("embedUrl")
     playback_url = complete.get("playback_url") or complete.get("playbackUrl")
 
-    deadline = time.time() + 15 * 60
+    # VCDN documents that /upload/complete normally returns status=processing
+    # and that playback becomes available on the video.ready state.  Do not
+    # create the Blogger post while VCDN is still transcoding.
+    def extract_playback(info):
+        if not isinstance(info, dict):
+            return None
+        direct = info.get("playback_url") or info.get("playbackUrl")
+        if direct:
+            return str(direct)
+        playback = info.get("playback")
+        if isinstance(playback, dict):
+            return (playback.get("hls") or playback.get("playback_url")
+                    or playback.get("playbackUrl"))
+        return None
+
+    playback_url = extract_playback(complete) or playback_url
+
+    # Allow enough time for long movies to finish transcoding.  The old 15
+    # minute timeout could leave a processing video with a guessed HLS URL,
+    # which produced "Unable to play this video" in the Blogger player.
+    deadline = time.time() + 60 * 60
     last_video = complete
+    poll_number = 0
+
     while time.time() < deadline:
-        if status == "ready" and embed_url:
-            break
         if status in ("failed", "error"):
             raise RuntimeError(f"VCDN processing failed for {video_id}: {last_video}")
-        time.sleep(5)
+
+        # We require BOTH the documented ready state and a real playback URL.
+        # A URL returned while status=processing is not treated as playable yet.
+        if status == "ready" and playback_url:
+            break
+
+        poll_number += 1
+        remaining = max(0, int(deadline - time.time()))
+        log(f"  VCDN waiting for video.ready... status={status or 'unknown'} "
+            f"remaining={remaining // 60}m")
+
+        # Poll every 10 seconds instead of 5 to avoid unnecessary API traffic.
+        time.sleep(10)
         try:
             info = _vcdn_json(
                 "GET",
@@ -409,26 +441,80 @@ def vcdn_upload(path, title):
         except Exception as poll_error:
             log(f"  VCDN status check failed: {poll_error}")
             continue
+
+        if not isinstance(info, dict):
+            continue
+
         last_video = info or last_video
         status = info.get("status") or status
         embed_url = info.get("embed_url") or info.get("embedUrl") or embed_url
-        playback_url = info.get("playback_url") or info.get("playbackUrl") or playback_url
-        progress = info.get("transcode_progress")
+        playback_url = extract_playback(info) or playback_url
+        progress = (info.get("transcode_progress")
+                    or info.get("transcodeProgress")
+                    or info.get("progress"))
         log(f"  VCDN status: {status} progress: {progress}")
+
+    if status != "ready":
+        raise RuntimeError(
+            "VCDN video did not reach the ready state within 60 minutes; "
+            "Blogger post was not created. Last response: " +
+            json.dumps(last_video, ensure_ascii=False)[:4000]
+        )
+
+    if not video_id or not playback_url:
+        raise RuntimeError(
+            "VCDN reported ready but returned no HLS playback URL; "
+            "Blogger post was not created. Last response: " +
+            json.dumps(last_video, ensure_ascii=False)[:4000]
+        )
 
     if not embed_url and video_id:
         embed_url = f"https://embed.vcdn.me/{video_id}"
-    if not playback_url and video_id:
-        playback_url = f"https://stream.vcdn.me/{video_id}/master.m3u8"
 
-    if not video_id or not playback_url:
-        raise RuntimeError(f"VCDN returned no usable HLS playback data: {last_video}")
+    # Final lightweight verification: fetch the HLS master playlist.  This
+    # prevents a post from being created if the API says ready but the CDN
+    # edge has not started serving the playlist yet.
+    def verify_hls(url):
+        req = urllib.request.Request(
+            str(url),
+            headers={
+                "User-Agent": VCDN_USER_AGENT,
+                "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read(128 * 1024).decode("utf-8", "replace")
+                if resp.status < 200 or resp.status >= 300:
+                    return False, f"HTTP {resp.status}"
+                if "#EXTM3U" not in raw:
+                    return False, "response is not an HLS playlist"
+                return True, "ok"
+        except Exception as exc:
+            return False, str(exc)
+
+    hls_ok = False
+    for attempt in range(1, 7):
+        hls_ok, reason = verify_hls(playback_url)
+        if hls_ok:
+            log("  VCDN HLS verification: OK")
+            break
+        log(f"  VCDN HLS not ready yet (attempt {attempt}/6): {reason}")
+        if attempt < 6:
+            time.sleep(10)
+
+    if not hls_ok:
+        raise RuntimeError(
+            "VCDN reported ready, but its HLS master playlist could not be "
+            "verified after 6 attempts. Blogger post was not created. "
+            f"URL={playback_url}; reason={reason}"
+        )
 
     log("  VCDN video:", video_id)
     log("  VCDN embed:", embed_url)
-    if playback_url:
-        log("  VCDN HLS:", playback_url)
-    log("  VCDN final status:", status or "unknown")
+    log("  VCDN HLS:", playback_url)
+    log("  VCDN final status:", status)
 
     return {
         "id": video_id,
@@ -958,10 +1044,15 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     hls.on(Hls.Events.MANIFEST_PARSED, function() {{ fillQualities(); setStatus('', false); }});
     hls.on(Hls.Events.LEVELS_UPDATED, fillQualities);
     hls.on(Hls.Events.ERROR, function(event, data) {{
-      if (data && data.fatal) {{
-        setStatus('Streaming error. Please refresh and try again.', true);
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+      if (!data || !data.fatal) return;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {{
+        setStatus('Network error. Retrying...', true);
+        try {{ hls.startLoad(); }} catch (e) {{}}
+      }} else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {{
+        setStatus('Recovering video...', true);
+        try {{ hls.recoverMediaError(); }} catch (e) {{}}
+      }} else {{
+        setStatus('Unable to play this video.', true);
       }}
     }});
   }} else {{
