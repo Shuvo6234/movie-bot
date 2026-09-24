@@ -1576,9 +1576,9 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     raw_title = str(meta["title"])
     title = e(raw_title)
     year = meta["release_year"]
-    lang_raw = str(meta.get("language") or "Unknown")
-    lang_known = lang_raw.lower() != "unknown"
-    lang = e(lang_raw)
+    ytxt = f" ({year})" if year else ""
+    lang_known = meta.get("language") and str(meta["language"]).lower() != "unknown"
+    lang = e(str(meta.get("language") or "Unknown"))
     original_lang = e(str(meta.get("original_language") or "Unknown"))
     genres = ", ".join(e(g) for g in meta.get("genres", [])) or "Drama"
     fps_txt = fmt_fps(fps)
@@ -1586,39 +1586,54 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     sizes = " - ".join(human(s) for _, _, s in outputs)
     colors = _post_colors(raw_title)
 
-    # Reference-style typography: dark theme is inherited from the Blogger post,
-    # while these inline colors make the Movie Info block visually similar to the
-    # supplied reference image. The palette changes deterministically per post.
+    # Movie Info layout copied from bot-9.py, while keeping the current
+    # verified IMDb rating system.
     info_title = (
-        f'<div style="text-align:center;margin:18px 0 16px;">'
-        f'<div style="font-size:26px;line-height:1.2;font-weight:800;'
-        f'color:{colors["heading"]};">Movie Info</div></div>'
+        f'<h3 style="text-align:center;color:{colors["heading"]};'
+        f'font-size:22px;line-height:1.4;margin:28px 0 18px;font-weight:800">'
+        'Movie Info</h3>'
     )
 
-    def row(label, value, value_color=None, emoji=""):
-        vc = value_color or colors["value"]
-        return (
-            f'<div style="margin:0 0 9px;line-height:1.35;">'
-            f'<span style="color:{colors["label"]};font-weight:800;">{emoji}{e(label)}:</span> '
-            f'<span style="color:{vc};font-weight:700;">{value}</span>'
-            f'</div>'
-        )
-
-    info_parts = []
+    info = []
     rating = str(meta.get("imdb_rating") or "N/A")
-    info_parts.append(row("IMDb Rating", e(rating), colors["rating"], "👉 "))
-    info_parts.append(row("Movie Name", title))
+    info.append(
+        f'<div><span style="color:{colors["rating"]};font-weight:800;">'
+        f'👉 IMDb Rating:-</span> '
+        f'<span style="color:{colors["value"]};font-weight:700;">{e(rating)}</span></div>'
+    )
+    info.append(
+        f'<div><b style="color:{colors["label"]};">Movie Name:</b> '
+        f'<span style="color:{colors["value"]};">{title}</span></div>'
+    )
     if year:
-        info_parts.append(row("Release Year", str(year)))
+        info.append(
+            f'<div><b style="color:{colors["label"]};">Release Year:</b> '
+            f'<span style="color:{colors["value"]};">{year}</span></div>'
+        )
+    if DIRECTOR_NAME:
+        info.append(
+            f'<div><b style="color:{colors["label"]};">Directed by:</b> '
+            f'<span style="color:{colors["value"]};">{e(DIRECTOR_NAME)}</span></div>'
+        )
     if lang_known:
-        info_parts.append(row("Language", lang, colors["lang"]))
-    info_parts.append(row("Size", e(sizes)))
-    info_parts.append(row("Format", "MP4"))
-    info_parts.append(row("Runtime", e(fmt_runtime(dur))))
-    info_parts.append(row("Quality", e(qualities), colors["quality"]))
-    info_parts.append(row("Original Language", original_lang))
-    info_parts.append(row("Genres", genres))
-    info_parts.append(row("Frame Rate", e(f"{fps_txt} FPS")))
+        info.append(
+            f'<div><b style="color:{colors["label"]};">Language:</b> '
+            f'<span style="color:{colors["lang"]};">{lang}</span></div>'
+        )
+    info += [
+        f'<div><b style="color:{colors["label"]};">Runtime:</b> '
+        f'<span style="color:{colors["value"]};">{fmt_runtime(dur)}</span></div>',
+        f'<div><b style="color:{colors["label"]};">Genres:</b> '
+        f'<span style="color:{colors["value"]};">{genres}</span></div>',
+        f'<div><b style="color:{colors["label"]};">Content Advisory:</b> '
+        f'<span style="color:{colors["value"]};">{e(meta["content_rating"])}</span></div>',
+        f'<div><b style="color:{colors["label"]};">Quality:</b> '
+        f'<span style="color:{colors["quality"]};">{qualities}</span></div>',
+        f'<div><b style="color:{colors["label"]};">Frame Rate:</b> '
+        f'<span style="color:{colors["value"]};">{fps_txt}fps</span></div>',
+        f'<div><b style="color:{colors["label"]};">Size:</b> '
+        f'<span style="color:{colors["value"]};">{sizes}</span></div>',
+    ]
 
     btn = (
         "display:block;width:200px;max-width:82%;margin:0 auto 18px;padding:11px 8px;"
@@ -1650,12 +1665,13 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
         f'line-height:1.3;margin:10px 0 28px;font-weight:800;">{title}</h2>'
     )
 
-    # 3) Movie Info
+    # 3) Movie Info — same field structure/style as bot-9.py, with the
+    # current verified IMDb rating added at the top.
     parts.append(info_title)
     parts.append(
-        f'<div style="font-size:16px;line-height:1.35;margin:0 auto 22px;max-width:100%;">'
-        + "".join(info_parts) +
-        '</div>'
+        '<p style="font-size:16px;line-height:1.55;margin:0 0 22px;">'
+        + "<br/>".join(info) +
+        '</p>'
     )
 
     # 4) VCDN player — immediately after Movie Info.
@@ -1726,7 +1742,6 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts.append(hr)
     parts.append(TIMER_SCRIPT)
     return "\n".join(parts)
-
 
 # ---------- main pipeline ----------
 def process(video, processed_folder, output_folder):
