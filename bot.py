@@ -2007,6 +2007,46 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     parts.append(TIMER_SCRIPT)
     return "\n".join(parts)
 
+# ---------- post-publish title sync ----------
+def sync_movie_name(post_id):
+    """Re-sync the 'Movie Name' shown inside an already-published post's
+    Movie Info card so it matches whatever the Blogger post title
+    currently is. Use this after manually renaming a post's title in the
+    Blogger dashboard, e.g.:
+
+        python bot.py sync <POST_ID> [<POST_ID> ...]
+
+    This only edits the 'Movie Name' value inside the post content; the
+    post title itself (which you already edited by hand) is left alone.
+    """
+    post = retry(lambda: blogger.posts().get(blogId=BLOG_ID, postId=post_id).execute())
+    live_title = post["title"]
+    content = post["content"]
+
+    pattern = re.compile(
+        r'(>Movie Name</div>\s*<div style="font-size:14px;line-height:1\.35;'
+        r'color:[^"]*;font-weight:700;overflow-wrap:anywhere;">)(.*?)(</div>)',
+        re.S,
+    )
+    new_value = html.escape(live_title)
+    new_content, n = pattern.subn(
+        lambda m: m.group(1) + new_value + m.group(3), content, count=1
+    )
+
+    if n == 0:
+        log(f"  Post {post_id}: could not find a 'Movie Name' field; nothing changed.")
+        return False
+
+    if new_content == content:
+        log(f"  Post {post_id}: Movie Name already matches title '{live_title}'; skipped.")
+        return True
+
+    retry(lambda: blogger.posts().patch(
+        blogId=BLOG_ID, postId=post_id, body={"content": new_content}).execute())
+    log(f"  Post {post_id}: Movie Name synced -> '{live_title}'")
+    return True
+
+
 # ---------- main pipeline ----------
 def process(video, processed_folder, output_folder):
     name = video["name"]
@@ -2031,6 +2071,16 @@ def process(video, processed_folder, output_folder):
     meta = analyze(name, frames, audio, site_labels)
     log("  Title:", meta["title"])
     log("  Labels:", meta["labels"])
+
+    # Manual title override: if MANUAL_TITLE is set, it replaces the
+    # AI-guessed title everywhere downstream (Movie Info card, Blogger post
+    # title, poster search, VCDN label) so there is only ONE source of
+    # truth for the title instead of the AI title and a separately-typed
+    # title drifting apart.
+    manual_title = os.environ.get("MANUAL_TITLE", "").strip()
+    if manual_title:
+        log(f"  Manual title override in use: '{manual_title}' (AI guessed '{meta['title']}')")
+        meta["title"] = manual_title
 
     log("Searching Google Images for movie poster thumbnail...")
     thumb = make_thumbnail(
@@ -2109,4 +2159,14 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "sync":
+        post_ids = sys.argv[2:]
+        all_ok = True
+        for pid in post_ids:
+            try:
+                all_ok = sync_movie_name(pid) and all_ok
+            except Exception:  # noqa
+                all_ok = False
+                traceback.print_exc()
+        sys.exit(0 if all_ok else 1)
     sys.exit(main())
