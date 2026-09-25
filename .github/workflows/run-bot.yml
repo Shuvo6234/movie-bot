@@ -2,6 +2,12 @@ name: Movie Bot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"   # every hour, at minute 0
+
+concurrency:
+  group: movie-bot
+  cancel-in-progress: false   # let a running job finish; don't kill mid-process
 
 jobs:
   movie-bot:
