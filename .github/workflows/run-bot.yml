@@ -24,7 +24,15 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Cache FFmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/bin/ffmpeg
+          key: ffmpeg-${{ runner.os }}-v1
+
       - name: Install FFmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
@@ -38,6 +46,18 @@ jobs:
             google-api-python-client \
             google-auth-httplib2 \
             google-auth-oauthlib
+
+      - name: Cache llama.cpp binary and local model
+        id: cache-llama
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/llama.cpp
+            ~/.cache/qwen3-vl
+            ~/.cache/models
+          key: llama-qwen3vl-${{ runner.os }}-v1
+          restore-keys: |
+            llama-qwen3vl-${{ runner.os }}-
 
       - name: Check FFmpeg
         run: |
@@ -68,3 +88,13 @@ jobs:
 
         run: |
           python bot.py
+
+      - name: Save llama.cpp cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/llama.cpp
+            ~/.cache/qwen3-vl
+            ~/.cache/models
+          key: llama-qwen3vl-${{ runner.os }}-v1
