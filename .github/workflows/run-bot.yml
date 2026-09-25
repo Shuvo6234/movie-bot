@@ -88,6 +88,12 @@ jobs:
           WAIT_SECONDS: 20
           DIRECTOR_NAME: ""
 
+          # Own-site sync: pull new videos from another site you own and
+          # mirror them here automatically. Leave SOURCE_WP_URL empty (or
+          # remove it) to turn this off.
+          SOURCE_WP_URL: "https://vegamovies.gt.tc/"
+          MAX_SYNC_POSTS: 1
+
         run: |
           python bot.py
 
