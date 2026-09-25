@@ -22,6 +22,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ---------------------------------------------------------
+      # PYTHON + PIP CACHE
+      # ---------------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -29,19 +32,29 @@ jobs:
           cache: "pip"
           cache-dependency-path: requirements.txt
 
+      # ---------------------------------------------------------
+      # LOCAL AI CACHE
+      # llama.cpp binary + Qwen3-VL model
+      # ---------------------------------------------------------
       - name: Restore Local AI cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.local/bin
             ~/.cache/movie-bot/llama
-          key: movie-bot-local-ai-v2-${{ runner.os }}-x64-qwen3-vl-4b
+          key: movie-bot-local-ai-v3-${{ runner.os }}-x64-qwen3-vl-4b
+          restore-keys: |
+            movie-bot-local-ai-v3-${{ runner.os }}-x64-qwen3-vl-4b
+            movie-bot-local-ai-v3-${{ runner.os }}-x64-
 
       - name: Prepare Local AI cache
         run: |
           mkdir -p "$HOME/.local/bin"
           mkdir -p "$HOME/.cache/movie-bot/llama"
 
+      # ---------------------------------------------------------
+      # FFMPEG
+      # ---------------------------------------------------------
       - name: Install FFmpeg if needed
         run: |
           if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
@@ -52,11 +65,17 @@ jobs:
             sudo apt-get install -y ffmpeg
           fi
 
+      # ---------------------------------------------------------
+      # PYTHON DEPENDENCIES
+      # ---------------------------------------------------------
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # ---------------------------------------------------------
+      # ENVIRONMENT CHECK
+      # ---------------------------------------------------------
       - name: Check environment
         run: |
           echo "Python:"
@@ -71,39 +90,80 @@ jobs:
           echo "Repository:"
           ls -la
 
+          echo "Local AI cache:"
+          ls -lah "$HOME/.cache/movie-bot/llama" || true
+
+          echo "Local binaries:"
+          ls -lah "$HOME/.local/bin" || true
+
+      # ---------------------------------------------------------
+      # MOVIE BOT
+      # ---------------------------------------------------------
       - name: Run Movie Bot
         env:
+          # -----------------------------------------------------
+          # GOOGLE DRIVE / BLOGGER
+          # -----------------------------------------------------
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           BLOG_ID: ${{ secrets.BLOG_ID }}
           DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
 
-          VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
+          # -----------------------------------------------------
+          # GEMINI
+          # -----------------------------------------------------
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
           GEMINI_MODEL: gemini-3.6-flash
+
+          # -----------------------------------------------------
+          # GOOGLE CLOUD VISION
+          # -----------------------------------------------------
+          GOOGLE_VISION_API_KEY: ${{ secrets.GOOGLE_VISION_API_KEY }}
+
+          # -----------------------------------------------------
+          # VCDN
+          # -----------------------------------------------------
+          VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
+
+          # -----------------------------------------------------
+          # VIDEO PROCESSING
+          # -----------------------------------------------------
           RESOLUTIONS: 480,720,1080
           MAX_VIDEOS: 1
+
+          # Draft by default
           PUBLISH: false
+
           LANGUAGE_HINT: ""
           AUDIO_MINUTES: 10
           SCREENSHOTS: 6
           WAIT_SECONDS: 20
           DIRECTOR_NAME: ""
 
+          # -----------------------------------------------------
+          # LOCAL QWEN3-VL FALLBACK
+          # -----------------------------------------------------
           LOCAL_AI_ENABLED: "true"
+
           LOCAL_QWEN_MODEL: "Qwen/Qwen3-VL-4B-Instruct-GGUF:Q4_K_M"
+
           LOCAL_AI_TIMEOUT: "900"
           LOCAL_AI_CONTEXT: "8192"
           LOCAL_AI_THREADS: "4"
           LOCAL_AI_MAX_IMAGES: "12"
 
+          # -----------------------------------------------------
+          # MODEL CACHE LOCATIONS
+          # -----------------------------------------------------
           LLAMA_CACHE: /home/runner/.cache/movie-bot/llama
           HF_HUB_CACHE: /home/runner/.cache/movie-bot/llama
           HUGGINGFACE_HUB_CACHE: /home/runner/.cache/movie-bot/llama
 
         run: |
           export PATH="$HOME/.local/bin:$PATH"
+
+          echo "Starting Movie Bot..."
           python bot.py
