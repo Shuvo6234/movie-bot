@@ -10,6 +10,7 @@ import difflib
 import base64
 import html
 import http.client
+import io
 import json
 import os
 import re
@@ -28,7 +29,7 @@ from pathlib import Path
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
 
 # ---------- settings ----------
 CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -59,6 +60,14 @@ MANUAL_TITLE = next((
     if os.environ.get(k, "").strip()
 ), "")
 CRF = {480: 24, 720: 23, 1080: 22, 1440: 22, 2160: 21}
+
+# ---------- own-site WordPress sync ----------
+# Optional: pull videos from another site YOU own (WordPress) and post them
+# here the same way Drive-sourced videos are posted. Leave SOURCE_WP_URL
+# empty to disable this feature entirely.
+SOURCE_WP_URL = os.environ.get("SOURCE_WP_URL", "").strip().rstrip("/")
+MAX_SYNC_POSTS = int(os.environ.get("MAX_SYNC_POSTS", "1"))
+SYNC_STATE_FILENAME = "wp_sync_state.json"
 
 # ---------- local AI fallback ----------
 # Gemini remains the primary AI. Qwen3-VL is started ONLY when a Gemini
@@ -155,6 +164,111 @@ def upload_public(path, parent, mime):
     retry(lambda: drive.permissions().create(
         fileId=fid, body={"type": "anyone", "role": "reader"}).execute())
     return fid
+
+
+# ---------- own-site WordPress sync helpers ----------
+def _find_sync_state_file(folder_id):
+    q = (f"'{folder_id}' in parents and name='{SYNC_STATE_FILENAME}' and trashed=false")
+    res = drive.files().list(q=q, fields="files(id)").execute()
+    return res["files"][0]["id"] if res["files"] else None
+
+
+def load_sync_state(folder_id):
+    """Returns the set of already-synced WordPress post IDs."""
+    fid = _find_sync_state_file(folder_id)
+    if not fid:
+        return set()
+    buf = io.BytesIO()
+    req = drive.files().get_media(fileId=fid)
+    dl = MediaIoBaseDownload(buf, req)
+    done = False
+    while not done:
+        _, done = retry(dl.next_chunk)
+    try:
+        return set(json.loads(buf.getvalue().decode("utf-8", "replace")))
+    except Exception:
+        return set()
+
+
+def save_sync_state(folder_id, ids):
+    fid = _find_sync_state_file(folder_id)
+    data = json.dumps(sorted(ids)).encode("utf-8")
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/json", resumable=False)
+    if fid:
+        retry(lambda: drive.files().update(fileId=fid, media_body=media).execute())
+    else:
+        retry(lambda: drive.files().create(
+            body={"name": SYNC_STATE_FILENAME, "parents": [folder_id]},
+            media_body=media, fields="id").execute())
+
+
+def wp_fetch_posts(base_url, per_page=10):
+    """Fetch the most recent posts from a WordPress site's REST API."""
+    url = (f"{base_url}/wp-json/wp/v2/posts?per_page={per_page}"
+           "&orderby=date&order=desc&_fields=id,link,title,content")
+    req = urllib.request.Request(url, headers={"User-Agent": "MovieBotSync/1.0"})
+
+    def _fetch():
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    return retry(_fetch, tries=3)
+
+
+# Matches the download-button links this same bot generates on its own
+# posts (class="mv-dl" ... href="..."), so a sister site running the same
+# code is detected with the highest reliability.
+_MV_DL_RE = re.compile(r'class="[^"]*\bmv-dl\b[^"]*"[^>]*href="([^"]+)"', re.I)
+_VIDEO_TAG_RE = re.compile(r'<(?:video|source)[^>]+src="([^"]+)"', re.I)
+_IFRAME_RE = re.compile(r'<iframe[^>]+src="([^"]+)"', re.I)
+_MP4_HREF_RE = re.compile(r'href="([^"]+\.(?:mp4|mkv|mov|webm)[^"]*)"', re.I)
+
+
+def extract_video_url(content_html):
+    """Best-effort detection of the source video URL inside a post's HTML.
+    Tries, in order: our own mv-dl download buttons, <video>/<source> tags,
+    a direct file link, then an <iframe> embed as a last resort (the embed
+    URL itself, which analyze() cannot download from directly)."""
+    for pattern in (_MV_DL_RE, _VIDEO_TAG_RE, _MP4_HREF_RE):
+        m = pattern.findall(content_html)
+        if m:
+            return html.unescape(m[0])
+    m = _IFRAME_RE.findall(content_html)
+    if m:
+        return html.unescape(m[0])
+    return None
+
+
+def normalize_drive_url(url):
+    """If url points at Google Drive (in any of its common link formats),
+    rewrite it to the reliable anonymous direct-download endpoint. Other
+    URLs are returned unchanged."""
+    if "drive.google.com" not in url and "drive.usercontent.google.com" not in url:
+        return url
+    m = (re.search(r"drive\.google\.com/file/d/([\w-]+)", url)
+         or re.search(r"[?&]id=([\w-]+)", url))
+    if m:
+        fid = m.group(1)
+        return f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
+    return url
+
+
+def download_url_to_file(url, dest, tries=3):
+    url = normalize_drive_url(url)
+    req = urllib.request.Request(url, headers={"User-Agent": "MovieBotSync/1.0"})
+
+    def _dl():
+        with urllib.request.urlopen(req, timeout=180) as resp, open(dest, "wb") as fh:
+            total = 0
+            while True:
+                chunk = resp.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                total += len(chunk)
+            log(f"  sync download complete ({human(total)})")
+
+    retry(_dl, tries=tries)
 
 
 # ---------- VCDN helpers ----------
@@ -2349,16 +2463,11 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
     return "\n".join(parts)
 
 # ---------- main pipeline ----------
-def process(video, processed_folder, output_folder):
-    name = video["name"]
-    log(f"\n=== Processing: {name} ===")
-    job = WORK / video["id"]
-    job.mkdir(parents=True, exist_ok=True)
-    src = str(job / "source.mp4")
+def _process_pipeline(name, src, job, output_folder):
+    """Everything from 'we have a local source.mp4' through 'Blogger post
+    created'. Shared by both the Drive-folder flow and the own-site
+    WordPress sync flow below."""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", Path(name).stem).strip("-").lower() or "movie"
-
-    log("Downloading original...")
-    download(video["id"], src)
     dur, w, h, fps = probe(src)
     short = min(w, h)
     log(f"Duration {dur / 60:.1f} min, {w}x{h}, {fps:.2f} fps")
@@ -2384,70 +2493,4 @@ def process(video, processed_folder, output_folder):
     outputs = []
     vcdn = None
 
-    for t in targets:
-        out = str(job / f"{slug}_{t}p.mp4")
-        log(f"Converting to {t}p...")
-        transcode(src, t, w, h, out)
-        size = os.path.getsize(out)
-        log(f"Uploading {t}p to Google Drive ({human(size)})...")
-        fid = upload_public(out, output_folder, "video/mp4")
-        outputs.append((t, fid, size))
-
-        os.remove(out)  # free disk
-
-    # Upload the ORIGINAL source to VCDN so its adaptive HLS pipeline gets
-    # the highest-quality source available, instead of only the generated
-    # 720p/1080p download file. This is what gives VCDN the best chance to
-    # create lower adaptive renditions such as 480p.
-    log("Uploading original source to VCDN for adaptive HLS...")
-    vcdn = vcdn_upload(src, meta["title"])
-
-    if not vcdn or not vcdn.get("embed_url"):
-        raise RuntimeError("VCDN upload did not return an embeddable player URL.")
-
-    log("Uploading images...")
-    thumb_id = upload_public(thumb, output_folder, "image/jpeg")
-    shot_ids = [upload_public(p, output_folder, "image/jpeg") for p in shots]
-
-    labels = list(meta["labels"])
-    if not labels:
-        unc = next((l for l in site_labels if l.lower() == "uncategorized"), None)
-        labels = [unc] if unc else [g for g in meta["genres"]][:2] + [meta["language"]]
-    labels = [str(l)[:40] for l in labels if l][:8]
-
-    content = build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn)
-    final_post_title = make_final_post_title(meta, outputs)
-    log("  Final Blogger title:", final_post_title)
-    body = {"kind": "blogger#post",
-            "title": final_post_title,
-            "content": content, "labels": labels}
-    post = retry(lambda: blogger.posts().insert(
-        blogId=BLOG_ID, body=body, isDraft=not PUBLISH).execute())
-    log("Blogger post created:", post.get("url") or post.get("id"),
-        "(DRAFT)" if not PUBLISH else "(PUBLISHED)")
-
-    drive.files().update(fileId=video["id"], addParents=processed_folder,
-                         removeParents=INPUT_FOLDER, fields="id").execute()
-    shutil.rmtree(job, ignore_errors=True)
-
-
-def main():
-    WORK.mkdir(exist_ok=True)
-    videos = list_videos()
-    if not videos:
-        log("No new videos in the input folder. Nothing to do.")
-        return 0
-    processed = ensure_folder("_processed")
-    output = ensure_folder("_output")
-    failed = 0
-    for v in videos[:MAX_VIDEOS]:
-        try:
-            process(v, processed, output)
-        except Exception:  # noqa
-            failed += 1
-            traceback.print_exc()
-    return 1 if failed else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+  
