@@ -1,4 +1,66 @@
-      - name: Check environment
+name: Movie Bot
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+
+concurrency:
+  group: movie-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  movie-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Restore Local AI cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin
+            ~/.cache/movie-bot/llama
+          key: movie-bot-local-ai-v3-${{ runner.os }}-x64-qwen3-vl-4b
+          restore-keys: |
+            movie-bot-local-ai-v3-${{ runner.os }}-x64-qwen3-vl-4b
+            movie-bot-local-ai-v3-${{ runner.os }}-x64-
+
+      - name: Prepare Local AI cache
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          mkdir -p "$HOME/.cache/movie-bot/llama"
+
+      - name: Install FFmpeg if needed
+        run: |
+          if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+            echo "FFmpeg already available."
+          else
+            echo "Installing FFmpeg..."
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+            - name: Check environment
         run: |
           echo "Python:"
           python --version
@@ -17,3 +79,46 @@
 
           echo "Local binaries:"
           ls -lah "$HOME/.local/bin" || true
+
+      - name: Run Movie Bot
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BLOG_ID: ${{ secrets.BLOG_ID }}
+          DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
+
+          GOOGLE_VISION_API_KEY: ${{ secrets.GOOGLE_VISION_API_KEY }}
+
+          VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
+
+          GEMINI_MODEL: gemini-3.6-flash
+
+          RESOLUTIONS: 480,720,1080
+          MAX_VIDEOS: 1
+          PUBLISH: false
+          LANGUAGE_HINT: ""
+          AUDIO_MINUTES: 10
+          SCREENSHOTS: 6
+          VISION_SCREENSHOTS: 1
+          WAIT_SECONDS: 20
+          DIRECTOR_NAME: ""
+
+          LOCAL_AI_ENABLED: "true"
+          LOCAL_QWEN_MODEL: "Qwen/Qwen3-VL-4B-Instruct-GGUF:Q4_K_M"
+          LOCAL_AI_TIMEOUT: "900"
+          LOCAL_AI_CONTEXT: "8192"
+          LOCAL_AI_THREADS: "4"
+          LOCAL_AI_MAX_IMAGES: "12"
+
+          LLAMA_CACHE: /home/runner/.cache/movie-bot/llama
+          HF_HUB_CACHE: /home/runner/.cache/movie-bot/llama
+          HUGGINGFACE_HUB_CACHE: /home/runner/.cache/movie-bot/llama
+
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+
+          echo "Starting Movie Bot..."
+          python bot.py
