@@ -27,10 +27,15 @@ from pathlib import Path
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 # ---------- settings ----------
+# Drive now authenticates via a service account (never expires).
+# Blogger still needs a normal user OAuth refresh token, since Blogger
+# does not support service-account access to a personal blog.
+SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
@@ -75,10 +80,8 @@ LOCAL_AI_MAX_IMAGES = int(os.environ.get("LOCAL_AI_MAX_IMAGES", "12"))
 
 
 WORK = Path("work")
-SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/blogger",
-]
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+BLOGGER_SCOPES = ["https://www.googleapis.com/auth/blogger"]
 
 
 def log(*a):
@@ -101,17 +104,25 @@ def run(cmd):
 
 
 # ---------- Google clients ----------
-creds = Credentials(
+# Drive: service account credentials. These never expire on their own.
+sa_info = json.loads(SERVICE_ACCOUNT_JSON)
+drive_creds = service_account.Credentials.from_service_account_info(
+    sa_info, scopes=DRIVE_SCOPES
+)
+drive = build("drive", "v3", credentials=drive_creds, cache_discovery=False)
+
+# Blogger: normal user OAuth refresh token (service accounts can't post
+# to a personal Blogger blog).
+blogger_creds = Credentials(
     None,
     refresh_token=REFRESH_TOKEN,
     token_uri="https://oauth2.googleapis.com/token",
     client_id=CLIENT_ID,
     client_secret=CLIENT_SECRET,
-    scopes=SCOPES,
+    scopes=BLOGGER_SCOPES,
 )
-creds.refresh(Request())
-drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-blogger = build("blogger", "v3", credentials=creds, cache_discovery=False)
+blogger_creds.refresh(Request())
+blogger = build("blogger", "v3", credentials=blogger_creds, cache_discovery=False)
 
 
 # ---------- Drive helpers ----------
