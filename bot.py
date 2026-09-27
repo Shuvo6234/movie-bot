@@ -81,7 +81,10 @@ LOCAL_AI_MAX_IMAGES = int(os.environ.get("LOCAL_AI_MAX_IMAGES", "12"))
 
 WORK = Path("work")
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
-BLOGGER_SCOPES = ["https://www.googleapis.com/auth/blogger"]
+USER_SCOPES = [
+    "https://www.googleapis.com/auth/blogger",
+    "https://www.googleapis.com/auth/drive.file",
+]
 
 
 def log(*a):
@@ -104,25 +107,33 @@ def run(cmd):
 
 
 # ---------- Google clients ----------
-# Drive: service account credentials. These never expire on their own.
+# Drive (read side): service account credentials. These never expire on
+# their own. Used for listing/downloading input videos, creating small
+# folders, and moving files between folders -- none of this consumes
+# storage quota, so the service account's lack of Drive storage is fine.
 sa_info = json.loads(SERVICE_ACCOUNT_JSON)
 drive_creds = service_account.Credentials.from_service_account_info(
     sa_info, scopes=DRIVE_SCOPES
 )
 drive = build("drive", "v3", credentials=drive_creds, cache_discovery=False)
 
-# Blogger: normal user OAuth refresh token (service accounts can't post
-# to a personal Blogger blog).
-blogger_creds = Credentials(
+# User OAuth (write side + Blogger): normal user refresh token, scoped to
+# Blogger and drive.file. Service accounts have zero Drive storage quota,
+# so NEW files (transcoded videos, thumbnails, screenshots) must be
+# created under the real Google account, which owns actual storage.
+# drive.file is a "sensitive" (not "restricted") scope, so it doesn't
+# block publishing the OAuth consent screen the way full "drive" does.
+user_creds = Credentials(
     None,
     refresh_token=REFRESH_TOKEN,
     token_uri="https://oauth2.googleapis.com/token",
     client_id=CLIENT_ID,
     client_secret=CLIENT_SECRET,
-    scopes=BLOGGER_SCOPES,
+    scopes=USER_SCOPES,
 )
-blogger_creds.refresh(Request())
-blogger = build("blogger", "v3", credentials=blogger_creds, cache_discovery=False)
+user_creds.refresh(Request())
+blogger = build("blogger", "v3", credentials=user_creds, cache_discovery=False)
+drive_write = build("drive", "v3", credentials=user_creds, cache_discovery=False)
 
 
 # ---------- Drive helpers ----------
@@ -156,14 +167,14 @@ def download(file_id, dest):
 
 def upload_public(path, parent, mime):
     media = MediaFileUpload(path, mimetype=mime, resumable=True, chunksize=64 * 1024 * 1024)
-    req = drive.files().create(
+    req = drive_write.files().create(
         body={"name": os.path.basename(path), "parents": [parent]},
         media_body=media, fields="id")
     resp = None
     while resp is None:
         _, resp = retry(req.next_chunk)
     fid = resp["id"]
-    retry(lambda: drive.permissions().create(
+    retry(lambda: drive_write.permissions().create(
         fileId=fid, body={"type": "anyone", "role": "reader"}).execute())
     return fid
 
