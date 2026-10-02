@@ -45,7 +45,7 @@ jobs:
             google-auth \
             google-api-python-client \
             google-auth-httplib2 \
-            google-auth-oauthlib
+            google-auth-oauthlib \
             internetarchive
 
       - name: Cache llama.cpp binary and local model
@@ -69,14 +69,15 @@ jobs:
 
       - name: Run Movie Bot
         env:
-        IA_ACCESS: ${{ secrets.IA_ACCESS }}
-IA_SECRET: ${{ secrets.IA_SECRET }}
+          IA_ACCESS: ${{ secrets.IA_ACCESS }}
+          IA_SECRET: ${{ secrets.IA_SECRET }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
           BLOG_ID: ${{ secrets.BLOG_ID }}
           DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
