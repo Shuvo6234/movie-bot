@@ -25,6 +25,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+import secrets
+from internetarchive import upload as ia_upload
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -65,6 +67,10 @@ MANUAL_TITLE = next((
     if os.environ.get(k, "").strip()
 ), "")
 CRF = {480: 24, 720: 23, 1080: 22, 1440: 22, 2160: 21}
+
+IA_ACCESS = os.environ["IA_ACCESS"]
+IA_SECRET = os.environ["IA_SECRET"]
+IA_FILE_EXT = os.environ.get("IA_FILE_EXT", "mp4").strip(". ").lower()
 
 # ---------- image quality (WebP) ----------
 # Screenshots and the poster thumbnail are exported as WebP.
@@ -204,6 +210,24 @@ def upload_public(path, parent, mime):
 
 
 # ---------- VCDN helpers ----------
+
+# ---------- Internet Archive ----------
+def make_ia_item_id(slug):
+    return f"{slug[:60]}-{secrets.token_hex(6)}"
+
+
+def ia_upload_file(path, item_id, title):
+    res = retry(lambda: ia_upload(
+        item_id, files=[path],
+        metadata={"mediatype": "data", "title": title, "noindex": "true"},
+        access_key=IA_ACCESS, secret_key=IA_SECRET,
+        queue_derive=False, retries=8, retries_sleep=30, verbose=True),
+        tries=2)
+    if not res or not all(r.status_code == 200 for r in res):
+        raise RuntimeError(f"Internet Archive upload failed: {res}")
+    return ("https://archive.org/download/" + item_id + "/"
+            + urllib.parse.quote(os.path.basename(path)))
+
 VCDN_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1373,7 +1397,16 @@ def transcode(src, target, w, h, out):
     run(["ffmpeg", "-y", "-loglevel", "error", "-stats", "-i", src,
          "-map", "0:v:0", "-map", "0:a?", "-vf", vf, "-pix_fmt", "yuv420p",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out])
+         def transcode(src, target, w, h, out):
+    crf = CRF.get(target, 23)
+    vf = f"scale=-2:{target}" if w >= h else f"scale={target}:-2"
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-stats", "-i", src,
+           "-map", "0:v:0", "-map", "0:a?", "-vf", vf, "-pix_fmt", "yuv420p",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+           "-c:a", "aac", "-b:a", "128k"]
+    if out.lower().endswith(".mp4"):
+        cmd += ["-movflags", "+faststart"]
+    run(cmd + [out])
 
 
 # ---------- menu labels (read from the live blog) ----------
@@ -2292,7 +2325,7 @@ def img_url(fid):
 TIMER_SCRIPT = """<script>
 (function () {
   var WAIT = %d;
-  var btns = document.querySelectorAll('a.mv-dl[data-fid]');
+  var btns = document.querySelectorAll('a.mv-dl[data-url]');
   for (var i = 0; i < btns.length; i++) {
     (function (b) {
       var label = b.innerHTML;
@@ -2312,8 +2345,7 @@ TIMER_SCRIPT = """<script>
           }
           clearInterval(t);
           b.innerHTML = 'Download starting...';
-          window.location.href = 'https://drive.usercontent.google.com/download?id=' +
-            b.getAttribute('data-fid') + '&export=download&confirm=t';
+          window.location.href = b.getAttribute('data-url');
           setTimeout(function () {
             b.innerHTML = label;
             b.style.opacity = '1';
@@ -2547,15 +2579,14 @@ def build_html(meta, thumb_id, shot_ids, outputs, fps, dur, vcdn):
         f'<h3 style="text-align:center;color:{colors["heading"]};font-size:22px;'
         f'margin:28px 0 18px;">Download Links</h3>'
     )
-    for h, fid, size in outputs:
-        direct = (f"https://drive.usercontent.google.com/download?id={fid}"
-                  "&amp;export=download&amp;confirm=t")
+    for h, dl_url, size in outputs:
         parts.append(
             f'<h4 style="{head}">{h}p x264 {fps_txt}fps '
             f'[{human(size)}]</h4>'
         )
         parts.append(
-            f'<a class="mv-dl" data-fid="{fid}" href="{direct}" rel="noopener" style="{btn}">'
+            f'<a class="mv-dl" data-url="{e(dl_url, quote=True)}" '
+            f'href="{e(dl_url, quote=True)}" rel="noopener" style="{btn}">'
             '&#11015;&#9889; DOWNLOAD NOW &#9889;&#11015;</a>'
         )
 
@@ -2662,6 +2693,19 @@ def process(video, processed_folder, output_folder):
         log(f"Uploading {t}p to Google Drive ({human(size)})...")
         fid = upload_public(out, output_folder, "video/mp4")
         outputs.append((t, fid, size))
+
+        outputs = []
+    vcdn = None
+    ia_item = make_ia_item_id(slug)
+
+    for t in targets:
+        out = str(job / f"{slug}_{t}p.{IA_FILE_EXT}")
+        log(f"Converting to {t}p...")
+        transcode(src, t, w, h, out)
+        size = os.path.getsize(out)
+        log(f"Uploading {t}p to Internet Archive ({human(size)})...")
+        dl_url = ia_upload_file(out, ia_item, meta["title"])
+        outputs.append((t, dl_url, size))
 
         os.remove(out)  # free disk
 
