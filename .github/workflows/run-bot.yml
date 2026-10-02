@@ -70,6 +70,7 @@ jobs:
       - name: Run Movie Bot
         env:
           IA_ACCESS: ${{ secrets.IA_ACCESS }}
+          IA_FILE_EXT: mkv
           IA_SECRET: ${{ secrets.IA_SECRET }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
