@@ -98,7 +98,7 @@ jobs:
           GEMINI_MODEL: gemini-3.6-flash
           RESOLUTIONS: 720,1080
           MAX_VIDEOS: 1
-          PUBLISH: false
+          PUBLISH: true
           LANGUAGE_HINT: ""
           AUDIO_MINUTES: 10
           SCREENSHOTS: 6
