@@ -59,5 +59,12 @@
    "https://archive.org/download/mkv-a7cfcca3777c/mkv_720p.mkv",
    2509583235
   ]
- ]
+ ],
+ "vcdn": {
+  "id": "71324d22-ee5a-4d69-8a12-4e7d4b1b5fbf",
+  "embed_url": "https://embed.vcdn.me/embed/71324d22-ee5a-4d69-8a12-4e7d4b1b5fbf",
+  "playback_url": null,
+  "status": "transcoding"
+ },
+ "post_url": "https://www.cinemawala.sites.bd/"
 }
