@@ -2,5 +2,62 @@
  "dur": 9957.354,
  "w": 1920,
  "h": 816,
- "fps": 24.0
+ "fps": 24.0,
+ "ia_item": "mp4-57759eb89814",
+ "thumb_url": "https://archive.org/download/mp4-57759eb89814/thumb_2x3.webp",
+ "shot_urls": [
+  "https://archive.org/download/mp4-57759eb89814/shot_1.webp",
+  "https://archive.org/download/mp4-57759eb89814/shot_2.webp",
+  "https://archive.org/download/mp4-57759eb89814/shot_3.webp",
+  "https://archive.org/download/mp4-57759eb89814/shot_4.webp",
+  "https://archive.org/download/mp4-57759eb89814/shot_5.webp",
+  "https://archive.org/download/mp4-57759eb89814/shot_6.webp"
+ ],
+ "meta": {
+  "title": "mp4",
+  "source_filename": ".mp4",
+  "tagline": "The blood-drenched gold empire faces an all-out war as power-hungry enemies collide.",
+  "description": [
+   "In the blood-soaked fields of the Kolar Gold Fields, Rocky consolidates his supreme power after eliminating the ruthless ruler Garuda. Rising as the undisputed lord of the massive gold empire, he establishes a fortress-like command over the region, winning the deep loyalty of the liberated workers while systematically expanding his international smuggling ring.",
+   "However, Rocky's relentless rise to dominance attracts deadly adversaries from every angle. Adheera, a fierce and merciless warrior, seeks to reclaim the mines, while Prime Minister Ramika Sen deploys the full military power of the state to crush his lawless sanctuary. Surrounded by political betrayals, deadly ambushes, and escalating warfare, Rocky must wage an all-out battle on multiple fronts to defend his people, secure his throne, and fulfill an inescapable vow from his past."
+  ],
+  "imdb_rating": "N/A",
+  "imdb_id": "",
+  "language": "Hindi",
+  "original_language": "Kannada",
+  "genres": [
+   "Action",
+   "Crime",
+   "Drama"
+  ],
+  "content_rating": "Mature audience",
+  "tags": [
+   "Gold Mines",
+   "Mafia",
+   "Revenge",
+   "Crime Lord",
+   "Power Struggle",
+   "Empire"
+  ],
+  "release_year": 2022,
+  "labels": [
+   "Hindi Dubbed",
+   "1080P"
+  ],
+  "poster_urls": [],
+  "synopsis": [
+   "In the blood-soaked fields of the Kolar Gold Fields, Rocky consolidates his supreme power after eliminating the ruthless ruler Garuda. Rising as the undisputed lord of the massive gold empire, he establishes a fortress-like command over the region, winning the deep loyalty of the liberated workers while systematically expanding his international smuggling ring.",
+   "However, Rocky's relentless rise to dominance attracts deadly adversaries from every angle. Adheera, a fierce and merciless warrior, seeks to reclaim the mines, while Prime Minister Ramika Sen deploys the full military power of the state to crush his lawless sanctuary. Surrounded by political betrayals, deadly ambushes, and escalating warfare, Rocky must wage an all-out battle on multiple fronts to defend his people, secure his throne, and fulfill an inescapable vow from his past."
+  ],
+  "review": [],
+  "themes": [],
+  "faq": []
+ },
+ "outputs": [
+  [
+   720,
+   "https://archive.org/download/mp4-57759eb89814/mp4_720p.mkv",
+   2055579326
+  ]
+ ]
 }
