@@ -1,0 +1,68 @@
+{
+ "dur": 9957.354,
+ "w": 1920,
+ "h": 816,
+ "fps": 24.0,
+ "ia_item": "mp4-b3946cc01604",
+ "thumb_url": "https://archive.org/download/mp4-b3946cc01604/thumb_2x3.webp",
+ "shot_urls": [
+  "https://archive.org/download/mp4-b3946cc01604/shot_1.webp",
+  "https://archive.org/download/mp4-b3946cc01604/shot_2.webp",
+  "https://archive.org/download/mp4-b3946cc01604/shot_3.webp",
+  "https://archive.org/download/mp4-b3946cc01604/shot_4.webp",
+  "https://archive.org/download/mp4-b3946cc01604/shot_5.webp",
+  "https://archive.org/download/mp4-b3946cc01604/shot_6.webp"
+ ],
+ "meta": {
+  "title": "mp4",
+  "source_filename": ".mp4",
+  "tagline": "In a blood-soaked land, an unstoppable king fights to protect his empire and legacy.",
+  "description": [
+   "Set in the blood-soaked terrain of the Kolar Gold Fields, the story continues the rise of Rocky, a fierce and ambitious ruler who takes control of the lucrative gold empire. After eliminating his ruthless rival Garuda, Rocky establishes himself as the undisputed king of KGF. However, his unyielding reign attracts formidable enemies from all directions, including vengeful syndicates seeking power and government authorities determined to dismantle his illegal stronghold.",
+   "As threats mount from the deadly adversary Adheera and powerful political leaders, Rocky must navigate dangerous alliances, betrayal, and relentless attacks. Determined to keep his lifelong promise to his mother and protect the oppressed workers who look up to him, he prepares for an epic showdown. Surrounded by overwhelming enemy forces, Rocky stands firm, proving that his empire will be defended at any cost."
+  ],
+  "imdb_rating": "N/A",
+  "imdb_id": "",
+  "language": "Hindi",
+  "original_language": "Kannada",
+  "genres": [
+   "Action",
+   "Crime",
+   "Drama"
+  ],
+  "content_rating": "Mature audience",
+  "tags": [
+   "KGF",
+   "Rocky",
+   "Gold Fields",
+   "Action",
+   "Mafia",
+   "Empire"
+  ],
+  "release_year": 2022,
+  "labels": [
+   "Hindi Dubbed",
+   "1080P"
+  ],
+  "poster_urls": [],
+  "synopsis": [
+   "Set in the blood-soaked terrain of the Kolar Gold Fields, the story continues the rise of Rocky, a fierce and ambitious ruler who takes control of the lucrative gold empire. After eliminating his ruthless rival Garuda, Rocky establishes himself as the undisputed king of KGF. However, his unyielding reign attracts formidable enemies from all directions, including vengeful syndicates seeking power and government authorities determined to dismantle his illegal stronghold.",
+   "As threats mount from the deadly adversary Adheera and powerful political leaders, Rocky must navigate dangerous alliances, betrayal, and relentless attacks. Determined to keep his lifelong promise to his mother and protect the oppressed workers who look up to him, he prepares for an epic showdown. Surrounded by overwhelming enemy forces, Rocky stands firm, proving that his empire will be defended at any cost."
+  ],
+  "review": [],
+  "themes": [],
+  "faq": []
+ },
+ "outputs": [
+  [
+   720,
+   "https://archive.org/download/mp4-b3946cc01604/mp4_720p.mkv",
+   1700753159
+  ],
+  [
+   1080,
+   "https://archive.org/download/mp4-b3946cc01604/mp4_1080p.mkv",
+   2328846544
+  ]
+ ]
+}
