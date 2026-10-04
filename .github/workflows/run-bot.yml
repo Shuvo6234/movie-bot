@@ -98,6 +98,7 @@ jobs:
           GEMINI_MODEL: gemini-3.6-flash
           RESOLUTIONS: 720,1080
           MAX_VIDEOS: 1
+          X264_PRESET: veryfast
           PUBLISH: true
           LANGUAGE_HINT: ""
           AUDIO_MINUTES: 10
