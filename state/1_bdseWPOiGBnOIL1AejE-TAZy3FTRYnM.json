@@ -69,5 +69,11 @@
    "https://archive.org/download/kgf-chapter-2-2022-518318a47346/kgf-chapter-2-2022_1080p.mkv",
    2331918698
   ]
- ]
+ ],
+ "vcdn_pending": {
+  "id": "ff6a8d48-8a25-4a3e-ba92-2815acc1d032",
+  "embed_url": null,
+  "playback_url": null,
+  "status": "uploaded"
+ }
 }
