@@ -92,6 +92,7 @@ jobs:
           TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
           BLOG_ID: ${{ secrets.BLOG_ID }}
           DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
+          SHRTFLY_API_KEY: ${{ secrets.SHRTFLY_API_KEY }}
 
           # Custom player: CSS/JS already pasted in the Blogger theme
           PLAYER_IN_THEME: "true"
