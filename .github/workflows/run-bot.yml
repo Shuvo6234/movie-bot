@@ -80,7 +80,7 @@ jobs:
         id: bot
         env:
           IA_ACCESS: ${{ secrets.IA_ACCESS }}
-          IA_FILE_EXT: mp4   # must be mp4 so the custom player can stream it
+          IA_FILE_EXT: mkv   # Download button file; the player uses a separate MP4
           IA_SECRET: ${{ secrets.IA_SECRET }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
