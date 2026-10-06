@@ -80,7 +80,7 @@ jobs:
         id: bot
         env:
           IA_ACCESS: ${{ secrets.IA_ACCESS }}
-          IA_FILE_EXT: mkv
+          IA_FILE_EXT: mp4   # must be mp4 so the custom player can stream it
           IA_SECRET: ${{ secrets.IA_SECRET }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -93,7 +93,9 @@ jobs:
           BLOG_ID: ${{ secrets.BLOG_ID }}
           DRIVE_INPUT_FOLDER_ID: ${{ secrets.DRIVE_INPUT_FOLDER_ID }}
 
-          VCDN_API_KEY: ${{ secrets.VCDN_API_KEY }}
+          # Custom player: CSS/JS already pasted in the Blogger theme
+          PLAYER_IN_THEME: "true"
+          PLAYER_DEFAULT_QUALITY: 720
 
           GEMINI_MODEL: gemini-3.6-flash
           RESOLUTIONS: 720,1080
