@@ -1,0 +1,74 @@
+{
+ "dur": 9957.354,
+ "w": 1920,
+ "h": 816,
+ "fps": 24.0,
+ "ia_item": "kgf-chapter-2-2022-5921b15e684e",
+ "thumb_url": "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/thumb_2x3.webp",
+ "shot_urls": [
+  "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/shot_1.webp",
+  "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/shot_2.webp",
+  "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/shot_3.webp",
+  "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/shot_4.webp",
+  "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/shot_5.webp",
+  "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/shot_6.webp"
+ ],
+ "meta": {
+  "title": "Kgf chapter 2",
+  "source_filename": "Kgf chapter 2  2022.mkv",
+  "tagline": "An empire built on blood must be defended at all costs.",
+  "description": [
+   "The blood-soaked land of Kolar Gold Fields (KGF) has a new overlord now - Rocky, whose name strikes fear in the heart of his foes. His allies look up to Rocky as their Savior, the government sees him as a threat to law and order; enemies are clamoring for revenge and conspiring for his downfall. Bloodier battles and darker days await as Rocky continues on his quest for unchallenged supremacy."
+  ],
+  "imdb_rating": "8.2/10",
+  "imdb_id": "tt10698680",
+  "language": "Hindi",
+  "original_language": "Kannada",
+  "genres": [
+   "Action",
+   "Thriller",
+   "Adventure"
+  ],
+  "content_rating": "Mature audience",
+  "tags": [
+   "gold mines",
+   "empire",
+   "action hero",
+   "power struggle",
+   "revenge",
+   "sequel"
+  ],
+  "release_year": 2022,
+  "labels": [
+   "1080P",
+   "Hindi Dubbed"
+  ],
+  "poster_urls": [
+   "https://image.tmdb.org/t/p/original/khNVygolU0TxLIDWff5tQlAhZ23.jpg",
+   "https://image.tmdb.org/t/p/original/au6Nq6kVr9NFICzpmYtMSyDA3Gi.jpg",
+   "https://image.tmdb.org/t/p/original/w2ffaHl3RueL3rpW7opxTevxHUa.jpg",
+   "https://image.tmdb.org/t/p/original/4wobXQ8VLfCHvgbevNMy8Rxvo41.jpg",
+   "https://m.media-amazon.com/images/M/MV5BZmQzZjVkZTUtYjI4ZC00ZDJmLWI0ZDUtZTFmMGM1Mzc5ZjIyXkEyXkFqcGc@._V1_.jpg"
+  ],
+  "synopsis": [
+   "The blood-soaked land of Kolar Gold Fields (KGF) has a new overlord now - Rocky, whose name strikes fear in the heart of his foes. His allies look up to Rocky as their Savior, the government sees him as a threat to law and order; enemies are clamoring for revenge and conspiring for his downfall. Bloodier battles and darker days await as Rocky continues on his quest for unchallenged supremacy."
+  ],
+  "review": [],
+  "themes": [],
+  "faq": []
+ },
+ "partial": {
+  "1080": {
+   "play_size": 2336044696,
+   "play_url": "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/kgf-chapter-2-2022_1080p.mp4"
+  }
+ },
+ "outputs": [
+  [
+   720,
+   "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/kgf-chapter-2-2022_720p.mkv",
+   1703986817,
+   "https://archive.org/download/kgf-chapter-2-2022-5921b15e684e/kgf-chapter-2-2022_720p.mp4"
+  ]
+ ]
+}
