@@ -18,6 +18,12 @@ concurrency:
   group: movie-bot
   cancel-in-progress: false   # let a running job finish; don't kill mid-process
 
+env:
+  # FFmpeg stable release line (static build from BtbN). Change to "8.1" for the
+  # older, very mature line. Changing this also changes the cache key,
+  # so the new version is downloaded once and cached again.
+  FFMPEG_VERSION: "9.0"
+
 jobs:
   movie-bot:
     runs-on: ubuntu-latest
@@ -25,26 +31,33 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
 
+      # ---- FFmpeg: downloaded ONCE, then restored from cache (a few seconds) ----
       - name: Cache FFmpeg
         id: cache-ffmpeg
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
-          path: /usr/bin/ffmpeg
-          key: ffmpeg-${{ runner.os }}-v1
+          path: ~/.local/ffmpeg
+          key: ffmpeg-static-${{ runner.os }}-${{ env.FFMPEG_VERSION }}-v1
 
       - name: Install FFmpeg
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          set -e
+          mkdir -p "$HOME/.local/ffmpeg"
+          URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n${FFMPEG_VERSION}-latest-linux64-gpl-${FFMPEG_VERSION}.tar.xz"
+          echo "Downloading $URL"
+          curl -fL --retry 5 --retry-delay 5 -o /tmp/ffmpeg.tar.xz "$URL"
+          tar -xJf /tmp/ffmpeg.tar.xz -C "$HOME/.local/ffmpeg" --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
+          chmod +x "$HOME/.local/ffmpeg/ffmpeg" "$HOME/.local/ffmpeg/ffprobe"
+          rm -f /tmp/ffmpeg.tar.xz
 
       - name: Install Python dependencies
         run: |
@@ -55,11 +68,12 @@ jobs:
             google-api-python-client \
             google-auth-httplib2 \
             google-auth-oauthlib \
-            internetarchive
+            internetarchive \
+            requests
 
       - name: Cache llama.cpp binary and local model
         id: cache-llama
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.local/bin
@@ -69,12 +83,16 @@ jobs:
             llama-qwen3vl-${{ runner.os }}-
 
       - name: Add local bin to PATH
-        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/ffmpeg" >> "$GITHUB_PATH"
 
       - name: Check FFmpeg
         run: |
-          ffmpeg -version
-          ffprobe -version
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+          ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 && echo "libx264 OK"
+          ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libwebp && echo "libwebp OK"
 
       - name: Run Movie Bot
         id: bot
@@ -99,7 +117,14 @@ jobs:
           PLAYER_DEFAULT_QUALITY: 720
 
           GEMINI_MODEL: gemini-3.6-flash
-          RESOLUTIONS: 720,1080
+
+          # Watch Online (player Quality menu) and Download buttons
+          PLAY_RESOLUTIONS: 180,240,360,480,720,1080
+          DOWNLOAD_RESOLUTIONS: 720,1080,1440,2160   # 2K/4K only if the source is that big
+
+          # Delete the Drive video after the Blogger post is created
+          DELETE_DRIVE_VIDEO: true
+
           MAX_VIDEOS: 1
           X264_PRESET: veryfast
           PUBLISH: true
@@ -133,7 +158,7 @@ jobs:
 
       - name: Save llama.cpp cache
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             ~/.local/bin
