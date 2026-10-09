@@ -1,0 +1,75 @@
+{
+ "dur": 8700.799,
+ "w": 1920,
+ "h": 802,
+ "fps": 23.976023976023978,
+ "ia_item": "spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4",
+ "thumb_url": "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-poster.webp",
+ "shot_urls": [
+  "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-screenshot-1.webp",
+  "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-screenshot-2.webp",
+  "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-screenshot-3.webp",
+  "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-screenshot-4.webp",
+  "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-screenshot-5.webp",
+  "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-screenshot-6.webp"
+ ],
+ "meta": {
+  "title": "Spider-Man: Brand New Day",
+  "source_filename": "Spider-Man.Brand.New.Day.2026.1080p.HEVC.DS4K.WEB-DL.H indi.5.1-English.5.1.ESub.x265-HDHub4u.Ms.mkv",
+  "tagline": "A fresh chapter begins as Peter Parker faces unprecedented supernatural threats and hidden enemies.",
+  "description": [
+   "Four years after the events that erased him from the memories of everyone he loves, an adult Peter Parker lives entirely alone. Having voluntarily chosen to step away from his past, he now operates as a full-time Spider-Man in a New York City where no one remembers his name. With no personal connections left, he devotes his entire existence to protecting the streets.",
+   "However, as the escalating demands of crime-fighting intensify, the extreme pressure sparks a surprising physical evolution within Peter that directly threatens his existence. At the same time, a strange new pattern of crimes begins surfacing across the city, giving rise to one of the most powerful threats he has ever faced."
+  ],
+  "imdb_rating": "8.0/10",
+  "imdb_id": "tt22084616",
+  "language": "Hindi - English",
+  "original_language": "English",
+  "genres": [
+   "Science Fiction",
+   "Action",
+   "Adventure"
+  ],
+  "content_rating": "Teen and above",
+  "tags": [
+   "spider man",
+   "peter parker",
+   "superhero",
+   "action",
+   "damage control",
+   "marvel"
+  ],
+  "release_year": 2026,
+  "labels": [
+   "Hindi Dubbed"
+  ],
+  "poster_urls": [
+   "https://image.tmdb.org/t/p/original/ghF1JYv7P5BgWHYfq9dqhqqNfz8.jpg",
+   "https://image.tmdb.org/t/p/original/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
+   "https://image.tmdb.org/t/p/original/dswjf9LMu2DAffcvTBzqYK3pu10.jpg",
+   "https://image.tmdb.org/t/p/original/x19dchU8e38vQfW4epzOsQNLuZ2.jpg",
+   "https://m.media-amazon.com/images/M/MV5BOWNjYWM3NWItOGE0ZS00MWRjLThiZWEtYjc4ZmNmMmU5ZTVmXkEyXkFqcGc@._V1_.jpg"
+  ],
+  "synopsis": [
+   "Four years after the events that erased him from the memories of everyone he loves, an adult Peter Parker lives entirely alone. Having voluntarily chosen to step away from his past, he now operates as a full-time Spider-Man in a New York City where no one remembers his name. With no personal connections left, he devotes his entire existence to protecting the streets.",
+   "However, as the escalating demands of crime-fighting intensify, the extreme pressure sparks a surprising physical evolution within Peter that directly threatens his existence. At the same time, a strange new pattern of crimes begins surfacing across the city, giving rise to one of the most powerful threats he has ever faced."
+  ],
+  "review": [],
+  "themes": [],
+  "faq": []
+ },
+ "partial": {
+  "1080": {
+   "play_size": 1772736707,
+   "play_url": "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-5-1-english-5-1-esub-x265-hdhub4u-ms_1080p.mp4"
+  }
+ },
+ "outputs": [
+  [
+   720,
+   "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-5-1-english-5-1-esub-x265-hdhub4u-ms_720p.mkv",
+   1367143104,
+   "https://archive.org/download/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-0648c7870ee4/spider-man-brand-new-day-2026-1080p-hevc-ds4k-web-dl-h-indi-5-1-english-5-1-esub-x265-hdhub4u-ms_720p.mp4"
+  ]
+ ]
+}
