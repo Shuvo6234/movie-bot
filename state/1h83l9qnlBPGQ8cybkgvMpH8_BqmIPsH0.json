@@ -1,0 +1,88 @@
+{
+ "dur": 7990.058,
+ "w": 1920,
+ "h": 1080,
+ "fps": 24.0,
+ "ia_item": "maremma-2026-44bbd94f7ae4",
+ "meta": {
+  "title": "Maremma",
+  "source_filename": "Maremma.2026.mkv",
+  "tagline": "",
+  "description": [
+   "In a village bound by ancient traditions, the Maremma Goddess festival is a time of both reverence and fear. Every 12 years, a male bull is sacrificed to the deity, yet with each ceremony, calamity befalls the villagers. Despite their efforts, the elders fail to prevent disaster. Determined to break the cycle, they enact a new decree: any household whose bull bears a male calf in the next 100 days must offer it to the goddess. As the deadline approaches, the fate of the village hangs in the balance, and the true test of their resolve begins."
+  ],
+  "imdb_rating": "N/A",
+  "imdb_id": "tt37537243",
+  "language": "Unknown",
+  "original_language": "Unknown",
+  "genres": [
+   "Action",
+   "Drama"
+  ],
+  "content_rating": "General audience",
+  "tags": [],
+  "release_year": 2026,
+  "labels": [],
+  "poster_urls": [
+   "https://image.tmdb.org/t/p/original/bDaDOhXgsm7R2WUPuLUBhbOjayX.jpg",
+   "https://image.tmdb.org/t/p/original/bYJm5Wq6xSak44QrKkatIJx7vRU.jpg",
+   "https://image.tmdb.org/t/p/original/gMN8kkciIx3abnABV3KJy6DnDgN.jpg",
+   "https://image.tmdb.org/t/p/original/fb3ULYmJnWXupHx3pbyW8CbnWPQ.jpg",
+   "https://m.media-amazon.com/images/M/MV5BMTk3YTliMjctMDhiYS00Y2FiLTg1YWMtOWM4ZTk0Y2JjNGNiXkEyXkFqcGc@._V1_.jpg"
+  ],
+  "synopsis": [
+   "In a village bound by ancient traditions, the Maremma Goddess festival is a time of both reverence and fear. Every 12 years, a male bull is sacrificed to the deity, yet with each ceremony, calamity befalls the villagers. Despite their efforts, the elders fail to prevent disaster. Determined to break the cycle, they enact a new decree: any household whose bull bears a male calf in the next 100 days must offer it to the goddess. As the deadline approaches, the fate of the village hangs in the balance, and the true test of their resolve begins."
+  ],
+  "review": [],
+  "themes": [],
+  "faq": []
+ },
+ "thumb_url": "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-poster.webp",
+ "shot_urls": [
+  "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-screenshot-1.webp",
+  "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-screenshot-2.webp",
+  "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-screenshot-3.webp",
+  "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-screenshot-4.webp",
+  "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-screenshot-5.webp",
+  "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-screenshot-6.webp"
+ ],
+ "player_poster_url": "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026-player-poster.webp",
+ "partial": {
+  "1080": {
+   "play_size": 4108636196,
+   "play_url": "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026_1080p.mp4"
+  }
+ },
+ "outputs": [
+  [
+   180,
+   "",
+   0,
+   "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026_180p.mp4"
+  ],
+  [
+   240,
+   "",
+   0,
+   "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026_240p.mp4"
+  ],
+  [
+   360,
+   "",
+   0,
+   "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026_360p.mp4"
+  ],
+  [
+   480,
+   "",
+   0,
+   "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026_480p.mp4"
+  ],
+  [
+   720,
+   "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026_720p.mkv",
+   2065170140,
+   "https://archive.org/download/maremma-2026-44bbd94f7ae4/maremma-2026_720p.mp4"
+  ]
+ ]
+}
