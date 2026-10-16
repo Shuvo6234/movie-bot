@@ -39,5 +39,42 @@
   "review": [],
   "themes": [],
   "faq": []
- }
+ },
+ "thumb_url": "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-poster.webp",
+ "shot_urls": [
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-screenshot-1.webp",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-screenshot-2.webp",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-screenshot-3.webp",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-screenshot-4.webp",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-screenshot-5.webp",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-screenshot-6.webp"
+ ],
+ "player_poster_url": "https://archive.org/download/gandhari-9282cab4cea0/gandhari-2026-player-poster.webp",
+ "partial": {},
+ "outputs": [
+  [
+   180,
+   "",
+   0,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_180p.mp4"
+  ],
+  [
+   240,
+   "",
+   0,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_240p.mp4"
+  ],
+  [
+   360,
+   "",
+   0,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_360p.mp4"
+  ],
+  [
+   480,
+   "",
+   0,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_480p.mp4"
+  ]
+ ]
 }
