@@ -75,6 +75,18 @@
    "",
    0,
    "https://archive.org/download/gandhari-9282cab4cea0/gandhari_480p.mp4"
+  ],
+  [
+   720,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_720p.mkv",
+   2132995499,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_720p.mp4"
+  ],
+  [
+   1080,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_1080p.mkv",
+   4194660029,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_1080p.mp4"
   ]
  ]
 }
