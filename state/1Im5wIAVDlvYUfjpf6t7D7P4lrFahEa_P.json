@@ -60,5 +60,49 @@
   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-screenshot-5.webp",
   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-screenshot-6.webp"
  ],
- "player_poster_url": "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-player-poster.webp"
+ "player_poster_url": "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-player-poster.webp",
+ "partial": {},
+ "outputs": [
+  [
+   180,
+   "",
+   0,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_180p.mp4"
+  ],
+  [
+   240,
+   "",
+   0,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_240p.mp4"
+  ],
+  [
+   360,
+   "",
+   0,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_360p.mp4"
+  ],
+  [
+   480,
+   "",
+   0,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_480p.mp4"
+  ],
+  [
+   720,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_720p.mkv",
+   3557478539,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_720p.mp4"
+  ],
+  [
+   1080,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_1080p.mkv",
+   12308487680,
+   "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_1080p.mp4"
+  ]
+ ],
+ "short_urls": {
+  "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_720p.mkv": "https://shrtslug.biz/97wY5",
+  "https://archive.org/download/the-meg-2018-1080p-bluray-hindi-english-7cb5fd1c3c43/the-meg-2018-1080p-bluray-hindi-english_1080p.mkv": "https://shrtslug.biz/97wY6"
+ },
+ "post_url": "https://www.cinemawala.sites.bd/2026/10/the-meg-2018-hindi-english-720p-1080p.html"
 }
