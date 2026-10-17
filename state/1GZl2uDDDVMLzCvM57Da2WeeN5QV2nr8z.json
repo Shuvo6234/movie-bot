@@ -93,6 +93,18 @@
    "https://archive.org/download/gandhari-9282cab4cea0/gandhari_1440p.mkv",
    5412041890,
    ""
+  ],
+  [
+   2160,
+   "https://archive.org/download/gandhari-9282cab4cea0/gandhari_2160p.mkv",
+   11566136414,
+   ""
   ]
- ]
+ ],
+ "short_urls": {
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari_720p.mkv": "https://shrtslug.biz/97tfc",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari_1080p.mkv": "https://shrtslug.biz/97tfd",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari_1440p.mkv": "https://shrtslug.biz/97tff",
+  "https://archive.org/download/gandhari-9282cab4cea0/gandhari_2160p.mkv": "https://shrtslug.biz/97tfg"
+ }
 }
